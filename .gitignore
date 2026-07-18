@@ -8,6 +8,11 @@ __pycache__/
 venv/
 ENV/
 
+# Configuration and secrets
+.env
+.env.*
+! .env.example
+
 # Databases
 *.db
 *.sqlite
