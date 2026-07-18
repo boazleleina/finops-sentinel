@@ -1,4 +1,4 @@
-# FinOps Sentinel 🛡️💰
+# FinOps Sentinel
 
 **FinOps Sentinel** is an automated, event-driven AWS Cost Optimization Agent engineered to continuously scan, evaluate, and remediate wasted resources across AWS environments. 
 
@@ -6,7 +6,7 @@ By applying strict FinOps principles, it identifies cloud waste (e.g. unattached
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 FinOps Sentinel is built on **Hexagonal Architecture (Ports & Adapters)** and **Domain-Driven Design (DDD)**. The core business rules are strictly decoupled from external libraries, databases, and AWS interfaces.
 
@@ -53,7 +53,7 @@ The application's foundational layer is fully completed and verified:
 
 ---
 
-## 🚀 Getting Started
+## Getting Started
 
 ### 1. Prerequisites
 *   Python 3.11+
@@ -114,7 +114,7 @@ Findings Generated: 4 violations
 
 ---
 
-## 🧪 Testing
+## Testing
 
 Run the test suite along with coverage reports:
 ```bash
@@ -123,7 +123,7 @@ pytest tests/ -v --cov=src/finops_sentinel --cov-report=term-missing
 
 ---
 
-## 🗺️ Roadmap
+## Roadmap
 *   **Phase 2:** Introduce FastAPI endpoints, Human-In-The-Loop (HITL) manual Slack callbacks (via Block Kit buttons), and automated AWS playbooks.
 *   **Phase 3:** Containerize applications using Docker and set up automated GitHub Actions CI/CD pipelines.
 *   **Phase 4:** Integrate Ollama LLM-Advisor adapter for automated optimization descriptions and rolling anomaly spent detection.
