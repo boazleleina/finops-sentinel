@@ -158,6 +158,21 @@ Findings Generated: 4 violations
 ...
 ```
 
+### 5. Start the API & Slack Tunnel (Optional)
+To enable the Human-In-The-Loop interactive Slack buttons, you need to run the FastAPI server and expose it to the internet using a tunnel like `ngrok`.
+
+Open a new terminal window and start the API:
+```bash
+source .venv/bin/activate
+uvicorn finops_sentinel.adapters.inbound.fastapi_app:app --reload --port 8000
+```
+
+Open a second terminal window and start ngrok:
+```bash
+ngrok http 8000
+```
+Copy the `Forwarding` URL from ngrok (e.g., `https://<your-id>.ngrok.app`) and paste it into your Slack App's **Interactivity & Shortcuts** page, appending `/callbacks/slack` to the end.
+
 ---
 
 ## Testing
