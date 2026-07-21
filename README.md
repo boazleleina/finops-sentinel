@@ -124,11 +124,12 @@ cp .env.example .env
 > **Note:** If you want to enable the interactive Slack alerts, please follow the [Slack Setup Guide](SLACK_SETUP.md) to configure your `.env` variables and Slack workspace correctly.
 
 ### 3. Spin Up and Seed Emulator
-We use LocalStack to emulate live AWS services locally:
+We use LocalStack to emulate live AWS services locally. 
+
+Because we use Docker Compose Profiles to separate development dependencies from production workloads, you **must** pass the `--profile dev` flag to explicitly spin up the LocalStack emulator:
 ```bash
-# Start LocalStack
-docker compose up -d
-#docker compose --profile dev up -d
+# Start LocalStack (Required: --profile dev)
+docker compose --profile dev up -d
 
 # Seed the environment with mock resources (EBS volumes, EIPs, EC2 instances)
 python scripts/seed_localstack.py
