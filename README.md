@@ -124,11 +124,12 @@ cp .env.example .env
 > **Note:** If you want to enable the interactive Slack alerts, please follow the [Slack Setup Guide](SLACK_SETUP.md) to configure your `.env` variables and Slack workspace correctly.
 
 ### 3. Spin Up and Seed Emulator
-We use LocalStack to emulate live AWS services locally:
+We use LocalStack to emulate live AWS services locally. 
+
+Because we use Docker Compose Profiles to separate development dependencies from production workloads, you **must** pass the `--profile dev` flag to explicitly spin up the LocalStack emulator:
 ```bash
-# Start LocalStack
-docker compose up -d
-#docker compose --profile dev up -d
+# Start LocalStack (Required: --profile dev)
+docker compose --profile dev up -d
 
 # Seed the environment with mock resources (EBS volumes, EIPs, EC2 instances)
 python scripts/seed_localstack.py
@@ -157,6 +158,28 @@ Findings Generated: 4 violations
 │ vol-90a6df3f        │ ebs_volume   │ ebs_unattached │          $1.60 │    Yes    │ OPEN   │
 ...
 ```
+
+### 5. Start the API & Slack Tunnel (Optional)
+To enable the Human-In-The-Loop interactive Slack buttons, you need to run the FastAPI server and expose it to the internet using a tunnel like `ngrok`.
+
+**First time setting up ngrok?**
+Install it via Homebrew and add your auth token (get it from the [ngrok dashboard](https://dashboard.ngrok.com)):
+```bash
+brew install ngrok/ngrok/ngrok
+ngrok config add-authtoken <your-auth-token>
+```
+
+Open a new terminal window and start the API:
+```bash
+source .venv/bin/activate
+uvicorn finops_sentinel.adapters.inbound.fastapi_app:app --reload --port 8000
+```
+
+Open a second terminal window and start the tunnel:
+```bash
+ngrok http 8000
+```
+Copy the `Forwarding` URL from ngrok (e.g., `https://<your-id>.ngrok.app`) and paste it into your Slack App's **Interactivity & Shortcuts** page, appending `/callbacks/slack` to the end.
 
 ---
 
