@@ -350,6 +350,7 @@ Local-first: **Phases 0–5 are entirely local.** I don't touch a real AWS accou
 - **Done when:** scheduled Lambda scans the real account, Slack buttons work against the deployed API, IAM passes a least-privilege review I do myself, monthly bill ≈ $0.
 
 ### Phase 7 — Stretch (I'll pick 1–2, never letting these block me)
+- **Conversational query interface (read-only)** — ask the agent questions in Slack: "what's costing me the most this month?", "why was that volume flagged?", "what did I approve last week?". The LLM translates natural language into repository queries (via a small allowlisted set of query functions — never raw SQL) and answers from real findings/inventory data. Strictly read-only, so it can't touch the guardrail surface; makes the system feel like an agent instead of a cron job with nice messages. Highly demo-able for @siliconmoran. Architecture: one new domain service (`answer_question`), the Advisor port grows a `query()` method, the Slack adapter routes app_mention events to it.
 - **Second notifier adapter** (Telegram or Discord) — the cheapest possible proof that the ports design works: new adapter + one config line, zero domain changes. Great demo/reel material.
 - **Checkov in CI** on terraform/ + one custom policy (deny gp2, require cost-allocation tags) — "policy-as-code" resume line.
 - **Terraform plan scanning:** parse `terraform show -json plan.out`, flag over-provisioned types, comment on the PR via Actions — catches waste *before* deploy.

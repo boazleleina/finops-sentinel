@@ -1,4 +1,4 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     dry_run: bool = True
@@ -6,6 +6,13 @@ class Settings(BaseSettings):
     aws_region: str = "us-east-1"
     aws_access_key_id: str | None = "test"
     aws_secret_access_key: str | None = "test"
+    
+    # Slack Settings
+    slack_webhook_url: str | None = None
+    slack_signing_secret: str | None = None
+    
+    # Path to the local SQLite database for finding persistence
+    sentinel_db_path: str = ".sentinel.db"
     
     # Static pricing table for cost estimation (based on us-east-1 standard pricing)
     # Source: https://aws.amazon.com/ebs/pricing/
@@ -19,7 +26,6 @@ class Settings(BaseSettings):
     # Thresholds
     stopped_ec2_threshold_days: int = 7
     
-    class Config:
-        env_file = ".env"
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 settings = Settings()

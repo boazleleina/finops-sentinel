@@ -43,13 +43,55 @@ FinOps Sentinel is built on **Hexagonal Architecture (Ports & Adapters)** and **
 
 ---
 
-## ⚡ Current Status: Phase 1 Completed
+## Progress
 
+### Phase 1 Completed: Core Scanning Engine
 The application's foundational layer is fully completed and verified:
-*   **Inventory Tracking:** Implemented a two-pass scanner architecture. Pass 1 snapshots inventory to `Resource` tables and manages resource lifecycles (marking missing objects as `DELETED`). Pass 2 evaluates rules to produce actionable `Finding` records.
-*   **Database Hardening:** Deployed Alembic migrations with strict SQLite schema rules, check constraints mapped to Domain enums, and a custom `SafeNumeric` TypeDecorator converting `Decimal` costs to strings to prevent floating-point drift.
+*   **Inventory Tracking:** Implemented a two-pass scanner architecture. Pass 1 snapshots inventory to `Resource` tables and manages resource lifecycles. Pass 2 evaluates rules to produce actionable `Finding` records.
+*   **Database Hardening:** Deployed Alembic migrations with strict SQLite schema rules, check constraints mapped to Domain enums, and a custom `SafeNumeric` TypeDecorator.
 *   **Interactive CLI:** Built the `sentinel` command line tool powered by `Typer` and `Rich` to trigger scans and display formatted waste summaries.
 *   **Test Suite Coverage:** Verified local functionality with a robust suite of unit and adapter tests using `pytest` and `moto`, achieving **89% overall code coverage**.
+
+**Phase 1 Architecture:**
+```
+       [ CLI / CronJob ]
+               │
+               ▼
+   ┌───────────────────────┐
+   │      Core Domain      │
+   │    [Rule Engine]      │
+   └───────────┬───────────┘
+               ▼
+   ┌───────────┴───────────┐
+   ▼                       ▼
+[ AWS Boto3 ]          [ SQLite ]
+(Read-Only Scans)    (Inventory State)
+```
+
+### Phase 2 Completed: Slack HITL & Remediation
+The Human-In-The-Loop integration and automated playbooks are fully completed and verified:
+*   **Slack Automation & HITL:** A fully functional FastAPI backend that receives interactive payloads from Slack Block Kit buttons. Includes real-time Slack message replacement and strict domain-layer verification to prevent duplicate executions.
+*   **Remediation Playbooks:** Boto3 adapters explicitly mapped to resource cleanup (taking snapshots before deleting EBS volumes, releasing EIPs, terminating instances).
+
+**Phase 2 Architecture:**
+```
+       [ CLI ]             [ Slack Webhooks ]
+          │                        │
+          ▼                        ▼
+      (Scanner)              (FastAPI API)
+          │                        │
+          └──────────┬─────────────┘
+                     ▼
+         ┌───────────────────────┐
+         │      Core Domain      │
+         │   [State Machine]     │
+         └───────────┬───────────┘
+                     ▼
+         ┌───────────┴───────────┐
+         ▼                       ▼
+    [ AWS Boto3 ]            [ SQLite ]
+(Read + Delete + Snap)    (Approval State)
+```
 
 ---
 
@@ -77,12 +119,14 @@ Set up local configurations:
 ```bash
 cp .env.example .env
 ```
+> **Note:** If you want to enable the interactive Slack alerts, please follow the [Slack Setup Guide](SLACK_SETUP.md) to configure your `.env` variables and Slack workspace correctly.
 
 ### 3. Spin Up and Seed Emulator
 We use LocalStack to emulate live AWS services locally:
 ```bash
 # Start LocalStack
 docker compose up -d
+#docker compose --profile dev up -d
 
 # Seed the environment with mock resources (EBS volumes, EIPs, EC2 instances)
 python scripts/seed_localstack.py
@@ -124,7 +168,7 @@ pytest tests/ -v --cov=src/finops_sentinel --cov-report=term-missing
 ---
 
 ## Roadmap
-*   **Phase 2:** Introduce FastAPI endpoints, Human-In-The-Loop (HITL) manual Slack callbacks (via Block Kit buttons), and automated AWS playbooks.
+*   ~~**Phase 2:** Introduce FastAPI endpoints, Human-In-The-Loop (HITL) manual Slack callbacks (via Block Kit buttons), and automated AWS playbooks.~~ (Completed!)
 *   **Phase 3:** Containerize applications using Docker and set up automated GitHub Actions CI/CD pipelines.
 *   **Phase 4:** Integrate Ollama LLM-Advisor adapter for automated optimization descriptions and rolling anomaly spent detection.
 *   **Phase 5:** Scaffold Kubernetes local orchestration via Helm charts.
