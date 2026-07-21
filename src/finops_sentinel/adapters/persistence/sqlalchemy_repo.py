@@ -256,3 +256,25 @@ class SqlAlchemyRepository(FindingsRepository):
             return findings
         finally:
             db.close()
+
+    def get_finding_by_id(self, finding_id: str) -> Optional[Finding]:
+        db = self.SessionLocal()
+        try:
+            db_f = db.query(FindingModel).filter(FindingModel.id == finding_id).first()
+            if not db_f:
+                return None
+            return Finding(
+                id=db_f.id,
+                resource_ref=db_f.resource_ref,
+                rule=db_f.rule,
+                evidence=json.loads(db_f.evidence),
+                tags_at_detection=json.loads(db_f.tags_at_detection),
+                est_monthly_cost_usd=db_f.est_monthly_cost_usd,
+                llm_summary=db_f.llm_summary,
+                status=FindingStatus(db_f.status),
+                protected=db_f.protected,
+                detected_at=db_f.detected_at.replace(tzinfo=UTC),
+                last_seen_at=db_f.last_seen_at.replace(tzinfo=UTC)
+            )
+        finally:
+            db.close()

@@ -5,6 +5,8 @@ from datetime import datetime, UTC
 
 from finops_sentinel.bootstrap import get_cloud_gateway, get_repository, get_scanners
 from finops_sentinel.domain.services import run_scan
+from finops_sentinel.domain.models import FindingStatus
+from finops_sentinel.adapters.notifications.slack import SlackAdapter
 
 app = typer.Typer(help="FinOps Sentinel - AWS Cost Optimization Agent")
 console = Console()
@@ -66,6 +68,13 @@ def scan():
         )
         if not f.protected:
             total_savings += float(f.est_monthly_cost_usd)
+            
+            # Phase 2: Send Slack Alert and transition to NOTIFIED
+            if f.status == FindingStatus.OPEN:
+                notifier = SlackAdapter()
+                notifier.send_finding_alert(f, resource)
+                f.status = FindingStatus.NOTIFIED
+                repo.save_finding(f)
             
     console.print(table)
     console.print(f"\n[bold]Total Potential Monthly Savings: [green]${total_savings:.2f}[/green][/bold]")

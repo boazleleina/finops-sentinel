@@ -27,3 +27,9 @@ pytest_debug.log
 # OS-specific
 .DS_Store
 Thumbs.db
+
+# Personal / AI Artifacts
+implementation_plan.md
+task.md
+walkthrough.md
+instructions.md

@@ -35,3 +35,7 @@ class FindingsRepository(ABC):
     @abstractmethod
     def get_findings(self) -> List[Finding]:
         pass
+
+    @abstractmethod
+    def get_finding_by_id(self, finding_id: str) -> Optional[Finding]:
+        pass
