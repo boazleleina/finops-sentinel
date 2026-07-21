@@ -73,6 +73,8 @@ The Human-In-The-Loop integration and automated playbooks are fully completed an
 *   **Slack Automation & HITL:** A fully functional FastAPI backend that receives interactive payloads from Slack Block Kit buttons. Includes real-time Slack message replacement and strict domain-layer verification to prevent duplicate executions.
 *   **Remediation Playbooks:** Boto3 adapters explicitly mapped to resource cleanup (taking snapshots before deleting EBS volumes, releasing EIPs, terminating instances).
 
+![Slack Integration Demo](slack-demo.png)
+
 **Phase 2 Architecture:**
 ```
        [ CLI ]             [ Slack Webhooks ]
