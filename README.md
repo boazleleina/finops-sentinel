@@ -166,7 +166,7 @@ The application's foundational layer is fully completed and verified:
 *   **Inventory Tracking:** Implemented a two-pass scanner architecture. Pass 1 snapshots inventory to `Resource` tables and manages resource lifecycles. Pass 2 evaluates rules to produce actionable `Finding` records.
 *   **Database Hardening:** Deployed Alembic migrations with strict SQLite schema rules, check constraints mapped to Domain enums, and a custom `SafeNumeric` TypeDecorator.
 *   **Interactive CLI:** Built the `sentinel` command line tool powered by `Typer` and `Rich` to trigger scans and display formatted waste summaries.
-*   **Test Suite Coverage:** Verified local functionality with a robust suite of unit and adapter tests using `pytest` and `moto`, achieving **89% overall code coverage**.
+*   **Test Suite Coverage:** Verified local functionality with a robust suite of unit and adapter tests using `pytest` and `moto`, achieving **90% overall code coverage** (45 tests across domain fakes, moto adapters, and a LocalStack integration suite).
 
 ### Phase 2 Completed: Slack HITL & Remediation
 The Human-In-The-Loop integration and automated playbooks are fully completed and verified:
