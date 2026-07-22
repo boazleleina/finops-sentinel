@@ -1,49 +1,121 @@
-# FinOps Sentinel
+# 🛡️ FinOps Sentinel
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![Coverage: 89%](https://img.shields.io/badge/coverage-89%25-brightgreen.svg)]()
+[![Code Style: Black](https://img.shields.io/badge/code%20style-black-000000.svg)]()
 
 **FinOps Sentinel** is an automated, event-driven AWS Cost Optimization Agent engineered to continuously scan, evaluate, and remediate wasted resources across AWS environments. 
 
-By applying strict FinOps principles, it identifies cloud waste (e.g. unattached EBS volumes, orphaned Elastic IPs, stopped EC2 instances), calculates potential monthly savings, and facilitates automated or human-in-the-loop (HITL) remediation.
+By applying strict FinOps principles, it identifies cloud waste (e.g., unattached EBS volumes, orphaned Elastic IPs, stopped EC2 instances), calculates potential monthly savings, and facilitates automated or Human-in-the-Loop (HITL) remediation via Slack.
 
 ---
 
-## Architecture
+## 📐 System Architecture
 
 FinOps Sentinel is built on **Hexagonal Architecture (Ports & Adapters)** and **Domain-Driven Design (DDD)**. The core business rules are strictly decoupled from external libraries, databases, and AWS interfaces.
 
-```
-       [ CLI / HTTP Clients ]
-                 │
-                 ▼ (Inbound Adapters)
-     ┌───────────────────────┐
-     │      Entry Points     │ (cli.py, fastapi_app.py)
-     └───────────┬───────────┘
-                 │ (Invokes)
-                 ▼
-     ┌───────────────────────┐
-     │      Core Domain      │ (models.py, services.py)
-     │   [State Machine]     │
-     └───────────┬───────────┘
-                 │ (Inverts Dependency)
-                 ▼ (Outbound Ports)
-     ┌───────────────────────┐
-     │       Abstract        │ (cloud.py, repository.py, notifier.py)
-     │      Interfaces       │
-     └───────────┬───────────┘
-                 │ (Implemented By)
-                 ▼ (Outbound Adapters)
-  ┌──────────────┼──────────────┐
-  ▼              ▼              ▼
-[ AWS Boto3 ]  [ SQLite ]     [ Slack Webhooks ]
-```
+```mermaid
+flowchart TD
+    %% Define Styles
+    classDef core fill:#2b3a42,stroke:#3f51b5,stroke-width:2px,color:#fff
+    classDef port fill:#1a2b3c,stroke:#00bcd4,stroke-width:2px,color:#fff,stroke-dasharray: 5 5
+    classDef adapter fill:#37474f,stroke:#4caf50,stroke-width:2px,color:#fff
+    classDef external fill:#eceff1,stroke:#607d8b,stroke-width:1px,color:#000
 
-*   **`domain/` (The Core):** Framework-free, pure Python models and workflows. Houses the core entity relationships and enforces state machine transitions (`TRANSITIONS` table).
-*   **`ports/` (The Contracts):** Abstract Base Classes defining boundary interfaces (`CloudGateway`, `FindingsRepository`, `Notifier`, `Scanner`).
-*   **`adapters/` (The Plumbing):** Clean implementations of our Ports. This includes `boto3` queries for AWS, `SQLAlchemy` for persistence, and `Typer` for the terminal interface.
-*   **`bootstrap.py` (Composition Root):** Wires dependencies together based on configurations, injecting concrete adapters into the domain orchestrator.
+    subgraph External["External World"]
+        CLI["💻 CLI Client"]:::external
+        SlackWeb["💬 Slack Interface"]:::external
+        AWS["☁️ AWS (Boto3)"]:::external
+        SQLite["🗄️ SQLite Database"]:::external
+    end
+
+    subgraph Adapters["Inbound Adapters"]
+        Typer["Typer (cli.py)"]:::adapter
+        FastAPI["FastAPI (fastapi_app.py)"]:::adapter
+    end
+
+    subgraph Ports["Ports (Interfaces)"]
+        CloudGateway["CloudGateway"]:::port
+        FindingsRepo["FindingsRepository"]:::port
+        Notifier["Notifier"]:::port
+        ScannerPort["Scanner"]:::port
+    end
+
+    subgraph Domain["Core Domain"]
+        Models["Entity Models"]:::core
+        Services["State Machine (services.py)"]:::core
+    end
+
+    subgraph OutboundAdapters["Outbound Adapters"]
+        BotoAdapter["Boto3CloudGateway"]:::adapter
+        SQLAdapter["SQLAlchemyRepository"]:::adapter
+        SlackAdapter["SlackNotifier"]:::adapter
+    end
+
+    %% Inbound Flow
+    CLI --> Typer
+    SlackWeb --> FastAPI
+    Typer -.->|Invokes| Services
+    FastAPI -.->|Invokes| Services
+
+    %% Domain Flow
+    Services --> Models
+    Services -.->|Depends On| CloudGateway
+    Services -.->|Depends On| FindingsRepo
+    Services -.->|Depends On| Notifier
+    Services -.->|Depends On| ScannerPort
+
+    %% Outbound Implementation
+    BotoAdapter -.->|Implements| CloudGateway
+    SQLAdapter -.->|Implements| FindingsRepo
+    SlackAdapter -.->|Implements| Notifier
+
+    %% Outbound Flow
+    BotoAdapter --> AWS
+    SQLAdapter --> SQLite
+    SlackAdapter --> SlackWeb
+```
 
 ---
 
-## Progress
+## 🗄️ Database Schema
+
+The persistence layer strictly maps to the Domain models, utilizing an event-driven lifecycle approach. Below is the Entity-Relationship Diagram (ERD).
+
+```mermaid
+erDiagram
+    RESOURCES {
+        string id PK "UUID"
+        string resource_id "e.g., vol-12345"
+        string resource_type "Enum: ebs_volume, elastic_ip, etc"
+        string resource_arn "AWS ARN"
+        string region "e.g., us-east-1"
+        json current_tags "Raw AWS Tags"
+        string lifecycle "Enum: active, deleted"
+        datetime first_seen_at
+        datetime last_seen_at
+    }
+
+    FINDINGS {
+        string id PK "Composite: rule_id|resource_id"
+        string rule_id "e.g., ebs_unattached"
+        string resource_ref FK "References RESOURCES.id"
+        json resource_data "Raw AWS Resource Data"
+        float savings_amount "Calculated monthly savings"
+        boolean is_protected "Protection status via tags"
+        string status "Enum: open, notified, approved, remediated, denied, expired, failed"
+        integer reminder_count
+        datetime created_at
+        datetime updated_at
+    }
+
+    RESOURCES ||--o{ FINDINGS : "Generates (0 to many)"
+```
+
+---
+
+## 🚀 Progress
 
 ### Phase 1 Completed: Core Scanning Engine
 The application's foundational layer is fully completed and verified:
@@ -52,22 +124,6 @@ The application's foundational layer is fully completed and verified:
 *   **Interactive CLI:** Built the `sentinel` command line tool powered by `Typer` and `Rich` to trigger scans and display formatted waste summaries.
 *   **Test Suite Coverage:** Verified local functionality with a robust suite of unit and adapter tests using `pytest` and `moto`, achieving **89% overall code coverage**.
 
-**Phase 1 Architecture:**
-```
-       [ CLI / CronJob ]
-               │
-               ▼
-   ┌───────────────────────┐
-   │      Core Domain      │
-   │    [Rule Engine]      │
-   └───────────┬───────────┘
-               ▼
-   ┌───────────┴───────────┐
-   ▼                       ▼
-[ AWS Boto3 ]          [ SQLite ]
-(Read-Only Scans)    (Inventory State)
-```
-
 ### Phase 2 Completed: Slack HITL & Remediation
 The Human-In-The-Loop integration and automated playbooks are fully completed and verified:
 *   **Slack Automation & HITL:** A fully functional FastAPI backend that receives interactive payloads from Slack Block Kit buttons. Includes real-time Slack message replacement and strict domain-layer verification to prevent duplicate executions.
@@ -75,29 +131,9 @@ The Human-In-The-Loop integration and automated playbooks are fully completed an
 
 ![Slack Integration Demo](slack-demo.png)
 
-**Phase 2 Architecture:**
-```
-       [ CLI ]             [ Slack Webhooks ]
-          │                        │
-          ▼                        ▼
-      (Scanner)              (FastAPI API)
-          │                        │
-          └──────────┬─────────────┘
-                     ▼
-         ┌───────────────────────┐
-         │      Core Domain      │
-         │   [State Machine]     │
-         └───────────┬───────────┘
-                     ▼
-         ┌───────────┴───────────┐
-         ▼                       ▼
-    [ AWS Boto3 ]            [ SQLite ]
-(Read + Delete + Snap)    (Approval State)
-```
-
 ---
 
-## Getting Started
+## 🛠️ Getting Started
 
 ### 1. Prerequisites
 *   Python 3.11+
@@ -183,7 +219,7 @@ Copy the `Forwarding` URL from ngrok (e.g., `https://<your-id>.ngrok.app`) and p
 
 ---
 
-## Testing
+## 🧪 Testing
 
 Run the test suite along with coverage reports:
 ```bash
@@ -192,8 +228,14 @@ pytest tests/ -v --cov=src/finops_sentinel --cov-report=term-missing
 
 ---
 
-## Roadmap
+## 🗺️ Roadmap
 *   ~~**Phase 2:** Introduce FastAPI endpoints, Human-In-The-Loop (HITL) manual Slack callbacks (via Block Kit buttons), and automated AWS playbooks.~~ (Completed!)
 *   **Phase 3:** Containerize applications using Docker and set up automated GitHub Actions CI/CD pipelines.
 *   **Phase 4:** Integrate Ollama LLM-Advisor adapter for automated optimization descriptions and rolling anomaly spent detection.
 *   **Phase 5:** Scaffold Kubernetes local orchestration via Helm charts.
+
+---
+
+## 📜 License
+
+This project is licensed under the [MIT License](LICENSE) - see the LICENSE file for details.
