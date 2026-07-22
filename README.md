@@ -1,4 +1,4 @@
-# 🛡️ FinOps Sentinel
+# FinOps Sentinel
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
@@ -11,7 +11,7 @@ By applying strict FinOps principles, it identifies cloud waste (e.g., unattache
 
 ---
 
-## 📐 System Architecture
+## System Architecture
 
 FinOps Sentinel is built on **Hexagonal Architecture (Ports & Adapters)** and **Domain-Driven Design (DDD)**. The core business rules are strictly decoupled from external libraries, databases, and AWS interfaces.
 
@@ -24,10 +24,10 @@ flowchart TD
     classDef external fill:#eceff1,stroke:#607d8b,stroke-width:1px,color:#000
 
     subgraph External["External World"]
-        CLI["💻 CLI Client"]:::external
-        SlackWeb["💬 Slack Interface"]:::external
-        AWS["☁️ AWS (Boto3)"]:::external
-        SQLite["🗄️ SQLite Database"]:::external
+        CLI["CLI Client"]:::external
+        SlackWeb["Slack Interface"]:::external
+        AWS["AWS (Boto3)"]:::external
+        SQLite["SQLite Database"]:::external
     end
 
     subgraph Adapters["Inbound Adapters"]
@@ -79,7 +79,7 @@ flowchart TD
 
 ---
 
-## 🗄️ Database Schema
+## Database Schema
 
 The persistence layer strictly maps to the Domain models, utilizing an event-driven lifecycle approach. Below is the Entity-Relationship Diagram (ERD).
 
@@ -115,7 +115,7 @@ erDiagram
 
 ---
 
-## 🚀 Progress
+## Progress
 
 ### Phase 1 Completed: Core Scanning Engine
 The application's foundational layer is fully completed and verified:
@@ -133,7 +133,7 @@ The Human-In-The-Loop integration and automated playbooks are fully completed an
 
 ---
 
-## 🛠️ Getting Started
+## Getting Started
 
 ### 1. Prerequisites
 *   Python 3.11+
@@ -219,7 +219,7 @@ Copy the `Forwarding` URL from ngrok (e.g., `https://<your-id>.ngrok.app`) and p
 
 ---
 
-## 🧪 Testing
+## Testing
 
 Run the test suite along with coverage reports:
 ```bash
@@ -228,7 +228,7 @@ pytest tests/ -v --cov=src/finops_sentinel --cov-report=term-missing
 
 ---
 
-## 🗺️ Roadmap
+## Roadmap
 *   ~~**Phase 2:** Introduce FastAPI endpoints, Human-In-The-Loop (HITL) manual Slack callbacks (via Block Kit buttons), and automated AWS playbooks.~~ (Completed!)
 *   **Phase 3:** Containerize applications using Docker and set up automated GitHub Actions CI/CD pipelines.
 *   **Phase 4:** Integrate Ollama LLM-Advisor adapter for automated optimization descriptions and rolling anomaly spent detection.
@@ -236,6 +236,6 @@ pytest tests/ -v --cov=src/finops_sentinel --cov-report=term-missing
 
 ---
 
-## 📜 License
+## License
 
 This project is licensed under the [MIT License](LICENSE) - see the LICENSE file for details.
