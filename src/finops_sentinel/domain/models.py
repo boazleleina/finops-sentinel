@@ -1,6 +1,6 @@
 from enum import StrEnum
 from pydantic import BaseModel, ConfigDict
-from typing import Literal, Optional, Any, Dict, Set
+from typing import Any, Literal, Optional
 from datetime import datetime
 from decimal import Decimal
 
@@ -37,7 +37,7 @@ class Resource(BaseModel):
     resource_type: ResourceType                
     resource_arn: str                          
     region: str                                
-    current_tags: dict                         
+    current_tags: dict[str, Any]                         
     lifecycle: ResourceLifecycle
     first_seen_at: datetime
     last_seen_at: datetime                     
@@ -48,8 +48,8 @@ class Finding(BaseModel):
     id: str
     resource_ref: str                          
     rule: str                                  
-    evidence: dict                             
-    tags_at_detection: dict                    
+    evidence: dict[str, Any]                             
+    tags_at_detection: dict[str, Any]                    
     est_monthly_cost_usd: Decimal              
     llm_summary: Optional[str] = None                    
     status: FindingStatus
@@ -68,4 +68,4 @@ class AuditEvent(BaseModel):
     ts: datetime
     event: str
     finding_id: Optional[str] = None
-    detail: dict
+    detail: dict[str, Any]

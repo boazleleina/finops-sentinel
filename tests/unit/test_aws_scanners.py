@@ -78,15 +78,53 @@ def test_ec2_scanner(mock_aws_env):
     ec2.stop_instances(InstanceIds=[instance_id])
     
     gateway = Boto3Gateway(region="us-east-1")
-    scanner = StoppedEC2Scanner(region="us-east-1")
-    
+    # threshold_days=0 so the just-stopped moto instance still qualifies
+    scanner = StoppedEC2Scanner(region="us-east-1", threshold_days=0)
+
     resources = scanner.discover(gateway)
     assert len(resources) == 1
-    
+
     res_ec2 = resources[0][0]
     assert res_ec2.resource_id == instance_id
     assert res_ec2.resource_type == ResourceType.EC2_INSTANCE
-    
+
     findings = scanner.evaluate(resources)
     assert len(findings) == 1
     assert findings[0].est_monthly_cost_usd == Decimal("5.00") # static cost in ec2.py
+
+
+def test_ec2_scanner_threshold(mock_aws_env):
+    """Instances stopped less than threshold_days ago are not flagged."""
+    from datetime import datetime, UTC, timedelta
+    from finops_sentinel.adapters.aws.scanners.ec2 import parse_stop_time
+    from finops_sentinel.domain.models import Resource, ResourceLifecycle
+
+    def instance_tuple(instance_id, stopped_at):
+        now = datetime.now(UTC)
+        resource = Resource(
+            id=f"res-{instance_id}", resource_id=instance_id,
+            resource_type=ResourceType.EC2_INSTANCE, resource_arn="arn",
+            region="us-east-1", current_tags={},
+            lifecycle=ResourceLifecycle.ACTIVE, first_seen_at=now, last_seen_at=now,
+        )
+        reason = (
+            f"User initiated ({stopped_at.strftime('%Y-%m-%d %H:%M:%S')} GMT)"
+            if stopped_at else ""
+        )
+        return resource, {"InstanceId": instance_id, "StateTransitionReason": reason}
+
+    now = datetime.now(UTC)
+    scanner = StoppedEC2Scanner(region="us-east-1", threshold_days=7)
+    findings = scanner.evaluate([
+        instance_tuple("i-fresh", now - timedelta(days=1)),    # under threshold: skipped
+        instance_tuple("i-old", now - timedelta(days=30)),     # over threshold: flagged
+        instance_tuple("i-unknown", None),                     # unknown stop time: flagged
+    ])
+
+    flagged = {f.evidence["InstanceId"] for f in findings}
+    assert flagged == {"i-old", "i-unknown"}
+
+    # parse_stop_time handles the AWS format and garbage
+    assert parse_stop_time("User initiated (2026-07-01 12:00:00 GMT)") is not None
+    assert parse_stop_time("") is None
+    assert parse_stop_time("weird string") is None
