@@ -30,6 +30,7 @@ dev = [
     "moto[ec2]>=5.0.0",
     "httpx>=0.24.0",
     "pytest-asyncio>=0.21.0",
+    "import-linter>=2.0",
 ]
 
 [build-system]
@@ -39,6 +40,28 @@ build-backend = "hatchling.build"
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+# Ports & adapters enforcement: dependencies point inward.
+# domain/ imports nothing external (pydantic only); adapters import domain,
+# never the reverse; only bootstrap wires concrete adapters.
+[tool.importlinter]
+root_package = "finops_sentinel"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Domain must not depend on adapters or the composition root"
+type = "forbidden"
+source_modules = ["finops_sentinel.domain", "finops_sentinel.ports"]
+forbidden_modules = ["finops_sentinel.adapters", "finops_sentinel.bootstrap"]
+
+[[tool.importlinter.contracts]]
+name = "Domain is pure Python (pydantic only)"
+type = "forbidden"
+source_modules = ["finops_sentinel.domain"]
+forbidden_modules = [
+    "boto3", "botocore", "fastapi", "sqlalchemy", "alembic",
+    "slack_sdk", "typer", "rich", "uvicorn", "httpx",
+]
 
 [tool.mypy]
 python_version = "3.11"

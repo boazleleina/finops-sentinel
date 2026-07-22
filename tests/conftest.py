@@ -2,7 +2,6 @@ import os
 import pytest
 import boto3
 from moto import mock_aws
-from sqlalchemy import create_engine
 from finops_sentinel.adapters.persistence.sqlalchemy_repo import SqlAlchemyRepository, Base
 from finops_sentinel.config import settings
 
@@ -20,6 +19,12 @@ def aws_credentials():
     settings.aws_endpoint_url = None
     settings.aws_access_key_id = "testing"
     settings.aws_secret_access_key = "testing"
+
+    # Never talk to a real Slack workspace from unit tests, and keep the
+    # safe default regardless of the developer's .env.
+    settings.slack_webhook_url = None
+    settings.slack_signing_secret = None
+    settings.dry_run = True
 
 @pytest.fixture
 def mock_aws_env():

@@ -1,7 +1,8 @@
 import uuid
-from typing import List, Tuple
+from typing import Any, List, Tuple
 from datetime import datetime, UTC
 from decimal import Decimal
+from finops_sentinel.domain.rules import is_protected as tag_is_protected
 from finops_sentinel.ports.scanner import Scanner
 from finops_sentinel.domain.models import Finding, Resource, ResourceType, ResourceLifecycle, FindingStatus
 from finops_sentinel.ports.cloud import CloudGateway
@@ -13,7 +14,7 @@ class UnattachedEBSScanner(Scanner):
         self.gp2_price = Decimal(str(gp2_price))
         self.gp3_price = Decimal(str(gp3_price))
 
-    def discover(self, gateway: CloudGateway) -> List[Tuple[Resource, dict]]:
+    def discover(self, gateway: CloudGateway) -> List[Tuple[Resource, dict[str, Any]]]:
         discovered = []
         volumes = gateway.describe_ebs_volumes()
         now = datetime.now(UTC)
@@ -40,7 +41,7 @@ class UnattachedEBSScanner(Scanner):
                 
         return discovered
 
-    def evaluate(self, resources: List[Tuple[Resource, dict]]) -> List[Finding]:
+    def evaluate(self, resources: List[Tuple[Resource, dict[str, Any]]]) -> List[Finding]:
         findings = []
         now = datetime.now(UTC)
         
@@ -54,7 +55,7 @@ class UnattachedEBSScanner(Scanner):
             size_gb = Decimal(str(volume['Size']))
             vol_type = volume.get('VolumeType', 'gp2')
             
-            is_protected = self.check_is_protected(resource.current_tags)
+            is_protected = tag_is_protected(resource.current_tags)
             
             cost_per_gb = self.gp3_price if vol_type == 'gp3' else self.gp2_price
             savings = size_gb * cost_per_gb
