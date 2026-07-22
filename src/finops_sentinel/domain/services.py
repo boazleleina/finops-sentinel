@@ -1,6 +1,6 @@
 from typing import List
 from datetime import datetime, UTC
-from finops_sentinel.domain.models import Finding, Resource, ResourceLifecycle
+from finops_sentinel.domain.models import Finding
 from finops_sentinel.ports.cloud import CloudGateway
 from finops_sentinel.ports.repository import FindingsRepository
 from finops_sentinel.ports.scanner import Scanner
