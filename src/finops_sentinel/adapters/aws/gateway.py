@@ -1,7 +1,9 @@
 import logging
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import boto3
+from botocore.exceptions import ClientError
 
 from finops_sentinel.ports.cloud import CloudGateway
 
@@ -23,6 +25,13 @@ class Boto3Gateway(CloudGateway):
     ):
         self.client = boto3.client(
             "ec2",
+            region_name=region,
+            endpoint_url=endpoint_url,
+            aws_access_key_id=aws_access_key_id,
+            aws_secret_access_key=aws_secret_access_key,
+        )
+        self.cloudwatch = boto3.client(
+            "cloudwatch",
             region_name=region,
             endpoint_url=endpoint_url,
             aws_access_key_id=aws_access_key_id,
@@ -60,6 +69,45 @@ class Boto3Gateway(CloudGateway):
         for page in page_iterator:
             snapshots.extend(page.get("Snapshots", []))
         return snapshots
+
+    def describe_running_ec2_instances(self) -> list[dict[str, Any]]:
+        instances: list[dict[str, Any]] = []
+        paginator = self.client.get_paginator("describe_instances")
+        page_iterator = paginator.paginate(
+            Filters=[{"Name": "instance-state-name", "Values": ["running"]}]
+        )
+        for page in page_iterator:
+            for reservation in page.get("Reservations", []):
+                instances.extend(reservation.get("Instances", []))
+        return instances
+
+    def get_instance_metric_averages(
+        self, instance_id: str, metric_name: str, days: int, period_seconds: int = 3600
+    ) -> list[float]:
+        end = datetime.now(UTC)
+        start = end - timedelta(days=days)
+        try:
+            response = self.cloudwatch.get_metric_statistics(
+                Namespace="AWS/EC2",
+                MetricName=metric_name,
+                Dimensions=[{"Name": "InstanceId", "Value": instance_id}],
+                StartTime=start,
+                EndTime=end,
+                Period=period_seconds,
+                Statistics=["Average"],
+            )
+        except ClientError as exc:
+            # A metrics outage must not fail the whole scan; an empty series
+            # reads as "unknown" downstream, which suppresses the finding.
+            logger.warning(
+                "CloudWatch %s lookup failed for %s: %s", metric_name, instance_id, exc
+            )
+            return []
+
+        datapoints = sorted(
+            response.get("Datapoints", []), key=lambda point: point["Timestamp"]
+        )
+        return [float(point["Average"]) for point in datapoints]
 
     def execute(self, playbook: str, resource_id: str, dry_run: bool) -> dict[str, Any]:
         playbooks = {

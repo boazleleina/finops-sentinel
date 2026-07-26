@@ -1,6 +1,5 @@
 import uuid
 from datetime import UTC, datetime
-from decimal import Decimal
 from typing import Any
 
 from finops_sentinel.domain.models import (
@@ -12,14 +11,15 @@ from finops_sentinel.domain.models import (
 )
 from finops_sentinel.domain.rules import is_protected as tag_is_protected
 from finops_sentinel.ports.cloud import CloudGateway
+from finops_sentinel.ports.pricing import Pricing
 from finops_sentinel.ports.scanner import Scanner
 
 
 class OrphanedEIPScanner(Scanner):
     
-    def __init__(self, region: str, eip_price: float):
+    def __init__(self, region: str, pricing: Pricing):
         self.region = region
-        self.eip_price = Decimal(str(eip_price))
+        self.pricing = pricing
 
     def discover(self, gateway: CloudGateway) -> list[tuple[Resource, dict[str, Any]]]:
         discovered = []
@@ -58,7 +58,7 @@ class OrphanedEIPScanner(Scanner):
                 
             if 'AssociationId' not in address:
                 is_protected = tag_is_protected(resource.current_tags)
-                savings = self.eip_price
+                savings = self.pricing.elastic_ip_monthly(region=resource.region)
                 
                 finding = Finding(
                     id=f"eip_orphaned|{resource.resource_id}",

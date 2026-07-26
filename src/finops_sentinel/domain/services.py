@@ -17,12 +17,19 @@ from finops_sentinel.domain.models import (
     FindingStatus,
     ResourceLifecycle,
 )
+from finops_sentinel.domain.summaries import render_template_summary
+from finops_sentinel.ports.advisor import Advisor
 from finops_sentinel.ports.cloud import CloudGateway
 from finops_sentinel.ports.notifier import Notifier
 from finops_sentinel.ports.repository import FindingsRepository
 from finops_sentinel.ports.scanner import Scanner
 
 EXPIRY_HOURS = 72
+
+# Max LLM calls per notify pass. Local inference costs seconds per finding, so
+# the spend goes to the most expensive findings and everything else takes the
+# deterministic template.
+DEFAULT_ADVISOR_BUDGET = 25
 
 
 def _audit(
@@ -76,20 +83,50 @@ def run_scan(
     return all_findings
 
 
-def notify_open_findings(repo: FindingsRepository, notifier: Notifier) -> list[Finding]:
+def notify_open_findings(
+    repo: FindingsRepository,
+    notifier: Notifier,
+    advisor: Advisor | None = None,
+    advisor_budget: int = DEFAULT_ADVISOR_BUDGET,
+) -> list[Finding]:
     """
     Send alerts for OPEN, non-protected findings and transition them to
     NOTIFIED. Protected findings are never notified and never leave OPEN.
     A failed send leaves the finding OPEN so the next scan retries it.
+
+    When an advisor is supplied, findings get a summary attached and persisted
+    before the alert goes out. The advisor is advisory only: its port forbids
+    raising, so a dead LLM backend cannot stop a notification.
+
+    Findings are processed most-expensive-first, and only the first
+    advisor_budget of them pay for LLM inference — the rest fall back to the
+    deterministic template. A local model costs seconds per call, so an
+    unbudgeted scan over an account with a thousand findings would run for
+    hours. Set advisor_budget=0 to skip inference entirely.
     """
     notified: list[Finding] = []
-    for finding in repo.get_findings(status=FindingStatus.OPEN):
+    candidates = sorted(
+        repo.get_findings(status=FindingStatus.OPEN),
+        key=lambda f: f.est_monthly_cost_usd,
+        reverse=True,
+    )
+    inferences_left = advisor_budget
+
+    for finding in candidates:
         if finding.protected:
             continue
 
         resource = repo.get_resource_by_id(finding.resource_ref)
         if resource is None:
             continue
+
+        if advisor is not None and not finding.llm_summary:
+            if inferences_left > 0:
+                finding.llm_summary = advisor.summarize(finding, resource)
+                inferences_left -= 1
+            else:
+                finding.llm_summary = render_template_summary(finding, resource)
+            repo.save_finding(finding)
 
         message_ref = notifier.send_finding_alert(finding, resource)
         if not repo.transition_finding(finding.id, FindingStatus.OPEN, FindingStatus.NOTIFIED):
@@ -158,6 +195,18 @@ def approve_finding(
             "approve_blocked_protected",
             finding.id,
             {"actor": actor, "resource_id": resource.resource_id},
+        )
+        return False
+
+    if not rules.is_remediable(finding.rule):
+        # Metric-inferred findings are advisory. The type-keyed playbook
+        # allowlist would happily hand an ec2_idle finding the
+        # terminate_stopped_instance playbook — and that instance is RUNNING.
+        _audit(
+            repo,
+            "approve_blocked_notify_only",
+            finding.id,
+            {"actor": actor, "rule": finding.rule},
         )
         return False
 

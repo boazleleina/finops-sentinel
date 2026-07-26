@@ -1,12 +1,20 @@
 
 services:
   localstack:
-    image: localstack/localstack:3
+    # LocalStack 4+: botocore now negotiates CloudWatch over
+    # smithy-rpc-v2-cbor, which the 3.x query-protocol parser rejects with
+    # "Missing Action in request" — every CloudWatch call fails on 3.x.
+    image: localstack/localstack:4
     ports:
       - "4566:4566"
     environment:
       - SERVICES=ec2,cloudwatch,sts
       - DEBUG=1
+      # LocalStack builds on moto: without this it seeds ~1160 default-AMI
+      # snapshots that describe_snapshots(OwnerIds=['self']) returns, and the
+      # snapshot rule reads every one as an old orphan. Same flag tests/conftest.py
+      # sets for moto.
+      - MOTO_EC2_LOAD_DEFAULT_AMIS=false
     volumes:
       - "${LOCALSTACK_VOLUME_DIR:-./volume}:/var/lib/localstack"
       - "/var/run/docker.sock:/var/run/docker.sock"
@@ -23,6 +31,12 @@ services:
     environment:
       - AWS_ENDPOINT_URL=http://localstack:4566
       - SENTINEL_DB_PATH=/app/data/sentinel.db
+      # Ollama stays on the host: Docker on Apple Silicon has no GPU
+      # passthrough, so a containerized Ollama would run CPU-only.
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+    extra_hosts:
+      # Docker Desktop resolves this already; needed for Linux engines.
+      - "host.docker.internal:host-gateway"
     env_file:
       - .env
     volumes:

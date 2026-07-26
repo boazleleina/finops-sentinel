@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from finops_sentinel.bootstrap import get_cloud_gateway, get_notifier, get_repository
 from finops_sentinel.config import settings
 from finops_sentinel.domain.models import AuditEvent, Finding, FindingStatus, Resource
+from finops_sentinel.domain.rules import is_remediable
 from finops_sentinel.domain.services import approve_finding, deny_finding
 
 app = FastAPI(title="FinOps Sentinel API", version="0.1.0")
@@ -46,6 +47,24 @@ def list_audit_events(finding_id: str | None = None) -> list[AuditEvent]:
     return get_repository().get_audit_events(finding_id=finding_id)
 
 
+def _refusal_reason(finding_id: str, action: str) -> str:
+    """Explain a refused decision.
+
+    Notify-only rules are refused by the domain for a reason callers cannot
+    guess from the generic message, and it is the one refusal a user can
+    trigger deliberately — so name it.
+    """
+    finding = get_repository().get_finding_by_id(finding_id)
+    if finding is not None and not is_remediable(finding.rule):
+        return (
+            f"Finding {finding_id} is advisory only: rule '{finding.rule}' is inferred from "
+            "metrics and has no automated remediation. Act on it manually."
+        )
+    return (
+        f"Finding {finding_id} cannot be {action}d (unknown, protected, or already decided)"
+    )
+
+
 def _decide(finding_id: str, action: str, actor: str, channel: str) -> bool:
     repo = get_repository()
     if action == "approve":
@@ -71,11 +90,7 @@ def post_decision(finding_id: str, body: DecisionRequest) -> DecisionResponse:
             status_code=502, detail=f"Remediation failed for {finding_id}: {exc}"
         ) from exc
     if not success:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Finding {finding_id} cannot be {body.action}d (unknown, protected, "
-            "or already decided)",
-        )
+        raise HTTPException(status_code=409, detail=_refusal_reason(finding_id, body.action))
     return DecisionResponse(
         finding_id=finding_id, action=body.action, success=True, dry_run=settings.dry_run
     )
@@ -115,7 +130,7 @@ async def notifier_callback(channel: str, request: Request) -> dict[str, Any]:
         return {"message": "failed", "outcome": outcome}
 
     if not success:
-        outcome = f"⚠️ Could not {decision.action} — already decided, protected, or gone."
+        outcome = f"⚠️ Could not {decision.action} — {_refusal_reason(decision.finding_id, decision.action)}"
     elif decision.action == "deny":
         outcome = f"🚫 *Denied* by @{decision.actor} — no action taken, finding closed."
     elif settings.dry_run:

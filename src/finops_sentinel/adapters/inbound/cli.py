@@ -1,14 +1,25 @@
+import time
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
 from finops_sentinel.bootstrap import (
+    get_advisor,
     get_cloud_gateway,
     get_notifier,
     get_repository,
     get_scanners,
+)
+from finops_sentinel.config import settings
+from finops_sentinel.domain.models import (
+    Finding,
+    FindingStatus,
+    Resource,
+    ResourceLifecycle,
+    ResourceType,
 )
 from finops_sentinel.domain.services import expire_stale, notify_open_findings, run_scan
 
@@ -29,7 +40,11 @@ def scan() -> None:
     scanners = get_scanners()
     notifier = get_notifier()
 
+    # Print the database up front: findings live here, and the API/Slack
+    # callback server must read this SAME path or every Approve click fails
+    # with "cannot be approved" because the lookup misses.
     console.print(f"Loaded [bold cyan]{len(scanners)}[/bold cyan] scanners.")
+    console.print(f"Findings database: [bold]{settings.sentinel_db_path}[/bold]")
 
     with console.status("[bold yellow]Scanning AWS environment and evaluating rules...[/bold yellow]"):
         start_time = datetime.now(UTC)
@@ -48,7 +63,9 @@ def scan() -> None:
         )
         return
 
-    notified = notify_open_findings(repo, notifier)
+    notified = notify_open_findings(
+        repo, notifier, get_advisor(), settings.advisor_max_findings_per_scan
+    )
 
     console.print(f"Findings Generated: [bold red]{len(findings)}[/bold red] violations")
     console.print(
@@ -100,6 +117,116 @@ def serve(host: str = "127.0.0.1", port: int = 8000) -> None:
 
     console.print(f"[bold green]Starting API server on {host}:{port}...[/bold green]")
     uvicorn.run("finops_sentinel.adapters.inbound.fastapi_app:app", host=host, port=port)
+
+
+@app.command()
+def smoke_llm(
+    iterations: int = 10,
+    model: str | None = typer.Option(
+        None, help="Override OLLAMA_MODEL for this run, e.g. --model qwen3:4B"
+    ),
+    base_url: str | None = typer.Option(None, help="Override OLLAMA_BASE_URL for this run"),
+) -> None:
+    """
+    Gate-check the LLM advisor: run the advisor prompt N times against a fixed
+    synthetic finding and report how many replies satisfied the strict schema,
+    plus latency. Exits non-zero if any iteration failed.
+
+    --model / --base-url let you compare models without editing .env, which is
+    the quickest way to qualify a new one before making it the default.
+    """
+    from finops_sentinel.adapters.advisor.ollama import OllamaAdvisor
+
+    if model or base_url:
+        advisor: object = OllamaAdvisor(
+            base_url=base_url or settings.ollama_base_url,
+            model=model or settings.ollama_model,
+            timeout_seconds=settings.ollama_timeout_seconds,
+        )
+    else:
+        advisor = get_advisor()
+
+    if not isinstance(advisor, OllamaAdvisor):
+        console.print(
+            f"[bold yellow]ADVISOR_PROVIDER={settings.advisor_provider} has no backend to "
+            "smoke-test (it needs no model). Set ADVISOR_PROVIDER=ollama, or pass "
+            "--model to test one directly.[/bold yellow]"
+        )
+        raise typer.Exit(1)
+
+    now = datetime.now(UTC)
+    resource = Resource(
+        id="smoke-resource",
+        resource_id="i-0123456789abcdef0",
+        resource_type=ResourceType.EC2_INSTANCE,
+        resource_arn="arn:aws:ec2:us-east-1:account:instance/i-0123456789abcdef0",
+        region="us-east-1",
+        current_tags={"Name": "batch-worker-03", "env": "staging"},
+        lifecycle=ResourceLifecycle.ACTIVE,
+        first_seen_at=now,
+        last_seen_at=now,
+    )
+    finding = Finding(
+        id="smoke|i-0123456789abcdef0",
+        resource_ref=resource.id,
+        rule="ec2_idle",
+        evidence={
+            "InstanceId": resource.resource_id,
+            "InstanceType": "m5.xlarge",
+            "State": "running",
+            "avg_cpu_percent": 0.7,
+            "max_cpu_percent": 3.1,
+            "avg_network_bytes": 12043.0,
+            "observation_days": 14,
+        },
+        tags_at_detection=resource.current_tags,
+        est_monthly_cost_usd=Decimal("140.16"),
+        status=FindingStatus.OPEN,
+        protected=False,
+        detected_at=now,
+        last_seen_at=now,
+    )
+
+    console.print(
+        f"Smoke-testing [bold cyan]{advisor.model}[/bold cyan] at "
+        f"[bold]{advisor.base_url}[/bold] — {iterations} iteration(s)\n"
+    )
+
+    passed = 0
+    failures: list[str] = []
+    durations: list[float] = []
+
+    for attempt in range(1, iterations + 1):
+        started = time.monotonic()
+        try:
+            response = advisor.advise(finding, resource)
+        except Exception as exc:  # noqa: BLE001 - a gate check reports every failure mode
+            failures.append(f"#{attempt}: {type(exc).__name__}: {exc}")
+            console.print(f"  [red]✗[/red] #{attempt} {type(exc).__name__}")
+            continue
+        elapsed = time.monotonic() - started
+        durations.append(elapsed)
+        passed += 1
+        console.print(f"  [green]✓[/green] #{attempt} {elapsed:.2f}s risk={response.risk}")
+
+    console.print(f"\nSchema-valid: [bold]{passed}/{iterations}[/bold]")
+    if durations:
+        console.print(
+            f"Latency: min {min(durations):.2f}s / "
+            f"mean {sum(durations) / len(durations):.2f}s / max {max(durations):.2f}s"
+        )
+    if failures:
+        console.print("\n[bold red]Failures:[/bold red]")
+        for failure in failures:
+            console.print(f"  {failure}")
+        console.print(
+            "\n[yellow]Note: the pipeline still runs — the advisor falls back to "
+            "deterministic templates on failure.[/yellow]"
+        )
+        raise typer.Exit(1)
+
+    console.print("\n[bold green]Advisor healthy.[/bold green]")
+    console.print(f"Sample: {advisor.summarize(finding, resource)}")
 
 
 @app.command()

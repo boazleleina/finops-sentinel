@@ -3,6 +3,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from finops_sentinel.domain.models import Decision, Finding, Resource
+from finops_sentinel.domain.rules import is_remediable
 from finops_sentinel.ports.notifier import Notifier
 
 logger = logging.getLogger(__name__)
@@ -20,12 +21,17 @@ class ConsoleNotifier(Notifier):
         return "console"
 
     def send_finding_alert(self, finding: Finding, resource: Resource) -> str | None:
+        if is_remediable(finding.rule):
+            next_step = f"Decide via POST /decisions/{finding.id}"
+        else:
+            next_step = "Advisory only — not remediable, review manually"
         logger.info(
-            "FinOps alert: %s on %s (~$%s/mo). Decide via POST /decisions/%s",
+            "FinOps alert: %s on %s (~$%s/mo). %s%s",
             finding.rule,
             resource.resource_id,
             finding.est_monthly_cost_usd,
-            finding.id,
+            next_step,
+            f"\n  {finding.llm_summary}" if finding.llm_summary else "",
         )
         return None
 

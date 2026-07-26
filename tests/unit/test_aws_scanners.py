@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from finops_sentinel.adapters.aws.gateway import Boto3Gateway
+from finops_sentinel.adapters.aws.pricing import StaticPricing
 from finops_sentinel.adapters.aws.scanners.ebs import UnattachedEBSScanner
 from finops_sentinel.adapters.aws.scanners.ebs_snapshots import OldEbsSnapshotScanner
 from finops_sentinel.adapters.aws.scanners.ec2 import StoppedEC2Scanner, parse_stop_time
@@ -19,7 +20,7 @@ def test_ebs_scanner(mock_aws_env):
     vol_gp3 = ec2.create_volume(AvailabilityZone="us-east-1a", Size=100, VolumeType="gp3")
     
     gateway = Boto3Gateway(region="us-east-1")
-    scanner = UnattachedEBSScanner(region="us-east-1", gp2_price=0.10, gp3_price=0.08)
+    scanner = UnattachedEBSScanner(region="us-east-1", pricing=StaticPricing())
     
     # Pass 1: Discover
     resources = scanner.discover(gateway)
@@ -53,7 +54,7 @@ def test_eip_scanner(mock_aws_env):
     # We will just test the unattached one for now.
     
     gateway = Boto3Gateway(region="us-east-1")
-    scanner = OrphanedEIPScanner(region="us-east-1", eip_price=3.65)
+    scanner = OrphanedEIPScanner(region="us-east-1", pricing=StaticPricing())
     
     resources = scanner.discover(gateway)
     assert len(resources) == 1
@@ -83,7 +84,7 @@ def test_ec2_scanner(mock_aws_env):
     
     gateway = Boto3Gateway(region="us-east-1")
     # threshold_days=0 so the just-stopped moto instance still qualifies
-    scanner = StoppedEC2Scanner(region="us-east-1", threshold_days=0)
+    scanner = StoppedEC2Scanner(region="us-east-1", pricing=StaticPricing(), threshold_days=0)
 
     resources = scanner.discover(gateway)
     assert len(resources) == 1
@@ -94,12 +95,14 @@ def test_ec2_scanner(mock_aws_env):
 
     findings = scanner.evaluate(resources)
     assert len(findings) == 1
-    assert findings[0].est_monthly_cost_usd == Decimal("5.00") # static cost in ec2.py
+    # Cost is now the instance's real attached EBS volumes, not a flat placeholder.
+    assert findings[0].est_monthly_cost_usd > Decimal(0)
+    assert findings[0].evidence["cost_basis"] in {"attached EBS volumes", "assumed root volume"}
 
 
 def test_ec2_scanner_threshold(mock_aws_env):
     """Instances stopped less than threshold_days ago are not flagged."""
-    def instance_tuple(instance_id, stopped_at):
+    def instance_tuple(instance_id, stopped_at, state="stopped"):
         now = datetime.now(UTC)
         resource = Resource(
             id=f"res-{instance_id}", resource_id=instance_id,
@@ -111,14 +114,23 @@ def test_ec2_scanner_threshold(mock_aws_env):
             f"User initiated ({stopped_at.strftime('%Y-%m-%d %H:%M:%S')} GMT)"
             if stopped_at else ""
         )
-        return resource, {"InstanceId": instance_id, "StateTransitionReason": reason}
+        return resource, {
+            "InstanceId": instance_id,
+            "StateTransitionReason": reason,
+            "State": {"Name": state},
+        }
 
     now = datetime.now(UTC)
-    scanner = StoppedEC2Scanner(region="us-east-1", threshold_days=7)
+    scanner = StoppedEC2Scanner(region="us-east-1", pricing=StaticPricing(), threshold_days=7)
     findings = scanner.evaluate([
         instance_tuple("i-fresh", now - timedelta(days=1)),    # under threshold: skipped
         instance_tuple("i-old", now - timedelta(days=30)),     # over threshold: flagged
         instance_tuple("i-unknown", None),                     # unknown stop time: flagged
+        # run_scan hands every scanner the combined inventory, so a RUNNING
+        # instance discovered by IdleEC2Scanner reaches this evaluate() too.
+        # It has no StateTransitionReason, which must NOT read as "unknown
+        # stop time, flag it anyway".
+        instance_tuple("i-running", None, state="running"),
     ])
 
     flagged = {f.evidence["InstanceId"] for f in findings}
@@ -150,9 +162,11 @@ def test_ebs_snapshot_scanner(mock_aws_env):
     ec2.delete_volume(VolumeId=vol_prot["VolumeId"])
     
     gateway = Boto3Gateway(region="us-east-1")
-    scanner = OldEbsSnapshotScanner(region="us-east-1", snapshot_price=0.05, age_threshold_days=30)
+    scanner = OldEbsSnapshotScanner(
+        region="us-east-1", pricing=StaticPricing(), age_threshold_days=30
+    )
     
-    vol_scanner = UnattachedEBSScanner(region="us-east-1", gp2_price=0.1, gp3_price=0.08)
+    vol_scanner = UnattachedEBSScanner(region="us-east-1", pricing=StaticPricing())
     vol_resources = vol_scanner.discover(gateway)
     
     snap_resources = scanner.discover(gateway)
@@ -178,3 +192,113 @@ def test_ebs_snapshot_scanner(mock_aws_env):
     
     assert snap_protected["SnapshotId"] in flagged_snap_ids
     assert flagged_snap_ids[snap_protected["SnapshotId"]].protected
+
+
+def test_gateway_describe_running_instances_excludes_stopped(mock_aws_env):
+    """The two EC2 rules need disjoint views: stopped vs running."""
+    ec2 = mock_aws_env
+    running = ec2.run_instances(ImageId="ami-12c6146b", MinCount=1, MaxCount=1)
+    stopped = ec2.run_instances(ImageId="ami-12c6146b", MinCount=1, MaxCount=1)
+    stopped_id = stopped["Instances"][0]["InstanceId"]
+    ec2.stop_instances(InstanceIds=[stopped_id])
+
+    gateway = Boto3Gateway(region="us-east-1")
+
+    running_ids = {i["InstanceId"] for i in gateway.describe_running_ec2_instances()}
+    stopped_ids = {i["InstanceId"] for i in gateway.describe_ec2_instances()}
+
+    assert running_ids == {running["Instances"][0]["InstanceId"]}
+    assert stopped_ids == {stopped_id}
+    assert running_ids.isdisjoint(stopped_ids)
+
+
+def test_gateway_metric_averages_are_ordered_oldest_first(mock_aws_env):
+    import boto3
+
+    cloudwatch = boto3.client("cloudwatch", region_name="us-east-1")
+    now = datetime.now(UTC)
+    # Publish out of chronological order to prove the adapter sorts.
+    for offset_hours, value in ((1, 3.0), (5, 1.0), (3, 2.0)):
+        cloudwatch.put_metric_data(
+            Namespace="AWS/EC2",
+            MetricData=[{
+                "MetricName": "CPUUtilization",
+                "Dimensions": [{"Name": "InstanceId", "Value": "i-metrics"}],
+                "Timestamp": now - timedelta(hours=offset_hours),
+                "Value": value,
+                "Unit": "Percent",
+            }],
+        )
+
+    gateway = Boto3Gateway(region="us-east-1")
+    averages = gateway.get_instance_metric_averages("i-metrics", "CPUUtilization", days=1)
+
+    assert averages == [1.0, 2.0, 3.0]
+
+
+def test_gateway_metric_averages_empty_for_unknown_instance(mock_aws_env):
+    """No data must read as 'unknown' (empty), never as 'idle' (zeros)."""
+    gateway = Boto3Gateway(region="us-east-1")
+
+    assert gateway.get_instance_metric_averages("i-nothing", "CPUUtilization", days=14) == []
+
+
+def _stopped_pair(instance_id, volume_ids):
+    """A stopped instance plus the Resource wrapper run_scan would produce."""
+    now = datetime.now(UTC)
+    resource = Resource(
+        id=f"res-{instance_id}", resource_id=instance_id,
+        resource_type=ResourceType.EC2_INSTANCE, resource_arn="arn",
+        region="us-east-1", current_tags={},
+        lifecycle=ResourceLifecycle.ACTIVE, first_seen_at=now, last_seen_at=now,
+    )
+    raw = {
+        "InstanceId": instance_id,
+        "State": {"Name": "stopped"},
+        "StateTransitionReason": "",
+        "BlockDeviceMappings": [{"Ebs": {"VolumeId": v}} for v in volume_ids],
+    }
+    return resource, raw
+
+
+def _volume_pair(volume_id, size_gb, volume_type="gp3"):
+    now = datetime.now(UTC)
+    resource = Resource(
+        id=f"res-{volume_id}", resource_id=volume_id,
+        resource_type=ResourceType.EBS_VOLUME, resource_arn="arn",
+        region="us-east-1", current_tags={},
+        lifecycle=ResourceLifecycle.ACTIVE, first_seen_at=now, last_seen_at=now,
+    )
+    return resource, {"VolumeId": volume_id, "Size": size_gb,
+                      "VolumeType": volume_type, "State": "in-use"}
+
+
+def test_stopped_instance_priced_from_its_real_attached_volumes():
+    """Replaces the old flat $5.00 placeholder."""
+    scanner = StoppedEC2Scanner(
+        region="us-east-1", pricing=StaticPricing(), threshold_days=0
+    )
+
+    findings = scanner.evaluate([
+        _stopped_pair("i-1", ["vol-root", "vol-data"]),
+        _volume_pair("vol-root", 100, "gp3"),   # 100 * 0.08 = 8.00
+        _volume_pair("vol-data", 50, "gp2"),    #  50 * 0.10 = 5.00
+    ])
+
+    assert len(findings) == 1
+    assert findings[0].est_monthly_cost_usd == Decimal("13.00")
+    assert findings[0].evidence["cost_basis"] == "attached EBS volumes"
+
+
+def test_stopped_instance_falls_back_when_volumes_are_not_in_inventory():
+    """No volume data must not mean $0 — that reads as 'free to keep'."""
+    scanner = StoppedEC2Scanner(
+        region="us-east-1", pricing=StaticPricing(), threshold_days=0
+    )
+
+    findings = scanner.evaluate([_stopped_pair("i-2", ["vol-missing"])])
+
+    assert len(findings) == 1
+    # Assumed 8 GB gp3 root volume: 8 * 0.08 = 0.64
+    assert findings[0].est_monthly_cost_usd == Decimal("0.64")
+    assert findings[0].evidence["cost_basis"] == "assumed root volume"

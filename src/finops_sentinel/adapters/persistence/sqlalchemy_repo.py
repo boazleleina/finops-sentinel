@@ -282,6 +282,11 @@ class SqlAlchemyRepository(FindingsRepository):
                 db_f.tags_at_detection = json.dumps(
                     finding.tags_at_detection, cls=DateTimeEncoder
                 )
+                # Only ever fill a summary in, never blank one out: findings
+                # loaded before the advisor ran carry llm_summary=None, and a
+                # re-scan must not erase advice already shown to operators.
+                if finding.llm_summary:
+                    db_f.llm_summary = finding.llm_summary
             db.commit()
             return True
         finally:

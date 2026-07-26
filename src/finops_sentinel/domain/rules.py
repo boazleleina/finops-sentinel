@@ -21,6 +21,19 @@ PLAYBOOK_ALLOWLIST: dict[ResourceType, str] = {
     ResourceType.EBS_SNAPSHOT: "delete_ebs_snapshot",
 }
 
+# Rules whose findings are inferred from metrics rather than observed state.
+# Low CPU is evidence, not proof: a warm standby, a batch host between runs,
+# or a license server all look idle. These findings are reported for humans
+# to act on out-of-band and are NEVER remediable, even when their resource
+# type has a playbook — without this gate an ec2_idle finding on a RUNNING
+# instance would inherit terminate_stopped_instance from the type allowlist.
+NOTIFY_ONLY_RULES: frozenset[str] = frozenset({"ec2_idle"})
+
+
+def is_remediable(rule: str) -> bool:
+    """False for metric-inferred rules, which are advisory only."""
+    return rule not in NOTIFY_ONLY_RULES
+
 
 def is_protected(tags: dict[str, Any] | list[dict[str, Any]] | None) -> bool:
     """True if the tag set carries the protection marker.

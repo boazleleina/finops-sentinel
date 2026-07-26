@@ -20,6 +20,13 @@ WORKDIR /app
 COPY --from=builder --chown=sentineluser:sentineluser /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
+# Migrations ship with the image so the schema can be created from inside the
+# container, against the container's own SENTINEL_DB_PATH. Running alembic on
+# the host instead points it at a different SQLite file, and every Slack
+# Approve then fails its finding lookup.
+COPY --chown=sentineluser:sentineluser alembic.ini ./alembic.ini
+COPY --chown=sentineluser:sentineluser alembic/ ./alembic/
+
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 

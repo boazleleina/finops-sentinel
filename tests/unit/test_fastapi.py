@@ -213,3 +213,33 @@ def test_slack_callback_signature_enforced(api_repo, monkeypatch):
     )
     assert response.status_code == 200
     assert api_repo.get_finding_by_id("f-123").status == FindingStatus.DENIED
+
+
+def test_notify_only_refusal_names_the_real_reason(api_repo):
+    """The generic 'already decided, protected, or gone' hid the actual cause."""
+    now = datetime.now(UTC)
+    api_repo.upsert_resource(
+        Resource(
+            id="res-idle", resource_id="i-idle", resource_type=ResourceType.EC2_INSTANCE,
+            resource_arn="arn", region="us-east-1", current_tags={},
+            lifecycle=ResourceLifecycle.ACTIVE, first_seen_at=now, last_seen_at=now,
+        )
+    )
+    api_repo.save_finding(
+        Finding(
+            id="ec2_idle|i-idle", resource_ref="res-idle", rule="ec2_idle", evidence={},
+            tags_at_detection={}, est_monthly_cost_usd=Decimal("70.08"),
+            status=FindingStatus.NOTIFIED, protected=False,
+            detected_at=now, last_seen_at=now,
+        )
+    )
+
+    response = client.post(
+        "/decisions/ec2_idle|i-idle", json={"action": "approve", "actor": "boaz"}
+    )
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert "advisory only" in detail
+    assert "ec2_idle" in detail
+    assert "already decided" not in detail

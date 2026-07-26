@@ -11,6 +11,7 @@ from slack_sdk.webhook import WebhookClient
 
 from finops_sentinel.config import settings
 from finops_sentinel.domain.models import Decision, Finding, Resource
+from finops_sentinel.domain.rules import is_remediable
 from finops_sentinel.ports.notifier import Notifier
 
 logger = logging.getLogger(__name__)
@@ -37,39 +38,78 @@ class SlackAdapter(Notifier):
         if not webhook_url:
             raise RuntimeError("SLACK_WEBHOOK_URL is not configured")
 
+        remediable = is_remediable(finding.rule)
+        header = (
+            "🚨 *FinOps Alert: Waste Detected*"
+            if remediable
+            else "📊 *FinOps Advisory: Possible Idle Resource*"
+        )
+
         blocks: list[dict[str, Any]] = [
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
                     "text": (
-                        "🚨 *FinOps Alert: Waste Detected*\n\n"
+                        f"{header}\n\n"
                         f"*Rule:* {finding.rule}\n"
                         f"*Resource:* `{resource.resource_id}` ({resource.resource_type})\n"
                         f"*Cost Impact:* ${finding.est_monthly_cost_usd}/mo"
                     ),
                 },
-            },
-            {
-                "type": "actions",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "Approve Remediation"},
-                        "style": "primary",
-                        "value": f"approve_{finding.id}",
-                        "action_id": "approve_remediation",
-                    },
-                    {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "Deny"},
-                        "style": "danger",
-                        "value": f"deny_{finding.id}",
-                        "action_id": "deny_remediation",
-                    },
-                ],
-            },
+            }
         ]
+
+        if finding.llm_summary:
+            # Advisor output is untrusted display copy (it summarizes
+            # user-controlled tags), so it goes in its own context block and is
+            # never used to build action values.
+            blocks.append(
+                {
+                    "type": "context",
+                    "elements": [{"type": "mrkdwn", "text": finding.llm_summary}],
+                }
+            )
+
+        if remediable:
+            blocks.append(
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "Approve Remediation"},
+                            "style": "primary",
+                            "value": f"approve_{finding.id}",
+                            "action_id": "approve_remediation",
+                        },
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "Deny"},
+                            "style": "danger",
+                            "value": f"deny_{finding.id}",
+                            "action_id": "deny_remediation",
+                        },
+                    ],
+                }
+            )
+        else:
+            # Metric-inferred: no playbook is allowed to run, so offering an
+            # Approve button would promise an action the domain refuses.
+            blocks.append(
+                {
+                    "type": "context",
+                    "elements": [
+                        {
+                            "type": "mrkdwn",
+                            "text": (
+                                "_Advisory only — inferred from CloudWatch metrics. "
+                                "No automated remediation is available for this rule._"
+                            ),
+                        }
+                    ],
+                }
+            )
 
         response = WebhookClient(webhook_url).send(
             text=f"FinOps Alert: {finding.rule} on {resource.resource_id}",
