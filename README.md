@@ -176,6 +176,12 @@ The Human-In-The-Loop integration and automated playbooks are fully completed an
 *   **Safety Guardrails (domain-enforced):** `DRY_RUN=true` by default — a dry-run approval records the attempt but leaves the finding `APPROVED`, never falsely `REMEDIATED`. Resources tagged `finops:protected=true` are excluded at scan time and re-checked at approval time. Approvals against resources that have since disappeared are refused cleanly. All transitions are race-safe compare-and-swap operations.
 *   **Finding Lifecycle:** Un-actioned notifications expire after 72 hours (`sentinel expire`), timed from the actual notification timestamp.
 
+### Phase 3 Completed: Docker, CI/CD, & EBS Snapshots
+The application is fully containerized and integrated with CI/CD pipelines:
+*   **Containerization:** A multi-stage Dockerfile running a non-root user, bundled via Docker Compose to manage the FastAPI app and LocalStack emulator network effortlessly.
+*   **CI/CD Automation:** GitHub Actions workflows (`ci.yml` and `build.yml`) established for rigorous static gates (Ruff, mypy, lint-imports), pytest test suites, Trivy vulnerability scanning, and automated image publishing to GHCR.
+*   **EBS Snapshot Scanner:** Implemented a complex scanner that evaluates EBS snapshot age and checks if the origin volume has been deleted (orphaned snapshots), fully integrated into the existing framework.
+
 **Full loop demo** — seed LocalStack, scan, Slack alert, one-click Approve, snapshot-then-delete remediation:
 
 ![FinOps Sentinel Demo](demo.gif)
@@ -214,21 +220,21 @@ alembic upgrade head
 > **Note:** If you want to enable the interactive Slack alerts, please follow the [Slack Setup Guide](SLACK_SETUP.md) to configure your `.env` variables and Slack workspace correctly.
 
 ### 3. Spin Up and Seed Emulator
-We use LocalStack to emulate live AWS services locally. 
+We use LocalStack to emulate live AWS services locally. The application is fully containerized.
 
-Because we use Docker Compose Profiles to separate development dependencies from production workloads, you **must** pass the `--profile dev` flag to explicitly spin up the LocalStack emulator:
+Because we use Docker Compose Profiles to separate development dependencies from production workloads, you **must** pass the `--profile dev` flag to explicitly spin up the LocalStack emulator alongside the Sentinel API:
 ```bash
-# Start LocalStack (Required: --profile dev)
+# Start LocalStack and the Sentinel API (Required: --profile dev)
 docker compose --profile dev up -d
 
-# Seed the environment with mock resources (EBS volumes, EIPs, EC2 instances)
+# Seed the environment with mock resources (EBS volumes, EIPs, EC2 instances, EBS snapshots)
 python scripts/seed_localstack.py
 ```
 
 ### 4. Run a Scan
-Trigger an on-demand cost optimization scan using the CLI:
+Trigger an on-demand cost optimization scan using the Dockerized CLI:
 ```bash
-sentinel scan
+docker exec finops-sentinel-app-1 sentinel scan
 ```
 
 The output will display optimization opportunities in a formatted table:
@@ -250,8 +256,8 @@ Notifications Sent: 3 (via slack)
 ...
 ```
 
-### 5. Start the API & Slack Tunnel (Optional)
-To enable the Human-In-The-Loop interactive Slack buttons, you need to run the FastAPI server and expose it to the internet using a tunnel like `ngrok`.
+### 5. Start the Slack Tunnel (Optional)
+To enable the Human-In-The-Loop interactive Slack buttons, you need to expose the API to the internet using a tunnel like `ngrok`.
 
 **First time setting up ngrok?**
 Install it via Homebrew and add your auth token (get it from the [ngrok dashboard](https://dashboard.ngrok.com)):
@@ -260,13 +266,7 @@ brew install ngrok/ngrok/ngrok
 ngrok config add-authtoken <your-auth-token>
 ```
 
-Open a new terminal window and start the API:
-```bash
-source .venv/bin/activate
-uvicorn finops_sentinel.adapters.inbound.fastapi_app:app --reload --port 8000
-```
-
-Open a second terminal window and start the tunnel:
+Since Docker automatically starts the FastAPI server on port 8000, you only need to start the tunnel in a new terminal window:
 ```bash
 ngrok http 8000
 ```
@@ -314,8 +314,8 @@ lint-imports             # architecture: domain imports nothing external, depend
 ---
 
 ## Roadmap
-*   ~~**Phase 2:** Introduce FastAPI endpoints, Human-In-The-Loop (HITL) manual Slack callbacks (via Block Kit buttons), and automated AWS playbooks.~~ (Completed!)
-*   **Phase 3:** Containerize applications using Docker and set up automated GitHub Actions CI/CD pipelines.
+*   ~~**Phase 2:** Introduce FastAPI endpoints, Human-In-The-Loop (HITL) manual Slack callbacks (via Block Kit buttons), and automated AWS playbooks.~~ (Completed)
+*   ~~**Phase 3:** Containerize applications using Docker and set up automated GitHub Actions CI/CD pipelines.~~ (Completed)
 *   **Phase 4:** Integrate Ollama LLM-Advisor adapter for automated optimization descriptions and rolling anomaly spent detection.
 *   **Phase 5:** Scaffold Kubernetes local orchestration via Helm charts.
 
