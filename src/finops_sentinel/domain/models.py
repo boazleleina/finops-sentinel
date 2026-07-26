@@ -1,8 +1,10 @@
-from enum import StrEnum
-from pydantic import BaseModel, ConfigDict
-from typing import Any, Literal, Optional
 from datetime import datetime
 from decimal import Decimal
+from enum import StrEnum
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict
+
 
 class FindingStatus(StrEnum):
     OPEN = "open"
@@ -51,7 +53,7 @@ class Finding(BaseModel):
     evidence: dict[str, Any]                             
     tags_at_detection: dict[str, Any]                    
     est_monthly_cost_usd: Decimal              
-    llm_summary: Optional[str] = None                    
+    llm_summary: str | None = None                    
     status: FindingStatus
     protected: bool
     detected_at: datetime                      
@@ -67,5 +69,5 @@ class Decision(BaseModel):
 class AuditEvent(BaseModel):                   
     ts: datetime
     event: str
-    finding_id: Optional[str] = None
+    finding_id: str | None = None
     detail: dict[str, Any]

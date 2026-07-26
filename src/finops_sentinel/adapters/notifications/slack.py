@@ -2,8 +2,9 @@ import json
 import logging
 import time
 import urllib.parse
+from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import Any, Literal, Mapping, Optional
+from typing import Any, Literal
 
 from slack_sdk.signature import SignatureVerifier
 from slack_sdk.webhook import WebhookClient
@@ -31,7 +32,7 @@ class SlackAdapter(Notifier):
     def channel_name(self) -> str:
         return "slack"
 
-    def send_finding_alert(self, finding: Finding, resource: Resource) -> Optional[str]:
+    def send_finding_alert(self, finding: Finding, resource: Resource) -> str | None:
         webhook_url = settings.slack_webhook_url
         if not webhook_url:
             raise RuntimeError("SLACK_WEBHOOK_URL is not configured")

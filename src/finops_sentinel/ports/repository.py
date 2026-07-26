@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Any, List, Optional
+from typing import Any
 
 from finops_sentinel.domain.models import AuditEvent, Decision, Finding, FindingStatus, Resource
 
@@ -16,11 +16,11 @@ class FindingsRepository(ABC):
         ...
 
     @abstractmethod
-    def get_resource_by_id(self, resource_id: str) -> Optional[Resource]:
+    def get_resource_by_id(self, resource_id: str) -> Resource | None:
         ...
 
     @abstractmethod
-    def get_all_resources(self) -> List[Resource]:
+    def get_all_resources(self) -> list[Resource]:
         ...
 
     @abstractmethod
@@ -50,11 +50,11 @@ class FindingsRepository(ABC):
         ...
 
     @abstractmethod
-    def get_findings(self, status: Optional[FindingStatus] = None) -> List[Finding]:
+    def get_findings(self, status: FindingStatus | None = None) -> list[Finding]:
         ...
 
     @abstractmethod
-    def get_finding_by_id(self, finding_id: str) -> Optional[Finding]:
+    def get_finding_by_id(self, finding_id: str) -> Finding | None:
         ...
 
     @abstractmethod
@@ -68,17 +68,17 @@ class FindingsRepository(ABC):
         ...
 
     @abstractmethod
-    def get_audit_events(self, finding_id: Optional[str] = None) -> List[AuditEvent]:
+    def get_audit_events(self, finding_id: str | None = None) -> list[AuditEvent]:
         ...
 
     @abstractmethod
     def record_notification(
-        self, finding_id: str, channel: str, message_ref: Optional[str], sent_at: datetime
+        self, finding_id: str, channel: str, message_ref: str | None, sent_at: datetime
     ) -> None:
         ...
 
     @abstractmethod
-    def get_latest_notification_time(self, finding_id: str) -> Optional[datetime]:
+    def get_latest_notification_time(self, finding_id: str) -> datetime | None:
         ...
 
     @abstractmethod

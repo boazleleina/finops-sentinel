@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+
 class Settings(BaseSettings):
     dry_run: bool = True
     aws_endpoint_url: str | None = "http://localhost:4566"

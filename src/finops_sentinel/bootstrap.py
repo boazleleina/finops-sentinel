@@ -4,8 +4,8 @@ The ONLY file that knows which concrete adapters exist.
 """
 from finops_sentinel.adapters.aws.gateway import Boto3Gateway
 from finops_sentinel.adapters.aws.scanners.ebs import UnattachedEBSScanner
-from finops_sentinel.adapters.aws.scanners.ec2 import StoppedEC2Scanner
 from finops_sentinel.adapters.aws.scanners.ebs_snapshots import OldEbsSnapshotScanner
+from finops_sentinel.adapters.aws.scanners.ec2 import StoppedEC2Scanner
 from finops_sentinel.adapters.aws.scanners.eip import OrphanedEIPScanner
 from finops_sentinel.adapters.notifications.console import ConsoleNotifier
 from finops_sentinel.adapters.notifications.slack import SlackAdapter

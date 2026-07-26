@@ -1,17 +1,25 @@
-from datetime import datetime, UTC, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 
 from finops_sentinel.domain.models import (
-    Resource, Finding, ResourceLifecycle, ResourceType, FindingStatus
+    Finding,
+    FindingStatus,
+    Resource,
+    ResourceLifecycle,
+    ResourceType,
 )
 from finops_sentinel.domain.services import (
-    run_scan, notify_open_findings, approve_finding, deny_finding, expire_stale
+    approve_finding,
+    deny_finding,
+    expire_stale,
+    notify_open_findings,
+    run_scan,
 )
-from finops_sentinel.ports.scanner import Scanner
 from finops_sentinel.ports.cloud import CloudGateway
 from finops_sentinel.ports.notifier import Notifier
+from finops_sentinel.ports.scanner import Scanner
 
 
 def make_resource(res_id="res-mock", resource_id="vol-123",

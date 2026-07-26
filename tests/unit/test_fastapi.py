@@ -1,6 +1,6 @@
 import json
 import time
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -11,7 +11,11 @@ from finops_sentinel.adapters.inbound import fastapi_app
 from finops_sentinel.adapters.persistence.sqlalchemy_repo import Base, SqlAlchemyRepository
 from finops_sentinel.config import settings
 from finops_sentinel.domain.models import (
-    Finding, FindingStatus, Resource, ResourceLifecycle, ResourceType
+    Finding,
+    FindingStatus,
+    Resource,
+    ResourceLifecycle,
+    ResourceType,
 )
 
 client = TestClient(fastapi_app.app, raise_server_exceptions=False)
