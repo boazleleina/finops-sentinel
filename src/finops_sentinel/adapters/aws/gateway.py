@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import boto3
 
@@ -17,9 +17,9 @@ class Boto3Gateway(CloudGateway):
     def __init__(
         self,
         region: str,
-        endpoint_url: Optional[str] = None,
-        aws_access_key_id: Optional[str] = None,
-        aws_secret_access_key: Optional[str] = None,
+        endpoint_url: str | None = None,
+        aws_access_key_id: str | None = None,
+        aws_secret_access_key: str | None = None,
     ):
         self.client = boto3.client(
             "ec2",
@@ -29,21 +29,21 @@ class Boto3Gateway(CloudGateway):
             aws_secret_access_key=aws_secret_access_key,
         )
 
-    def describe_ebs_volumes(self) -> List[Dict[str, Any]]:
-        volumes: List[Dict[str, Any]] = []
+    def describe_ebs_volumes(self) -> list[dict[str, Any]]:
+        volumes: list[dict[str, Any]] = []
         paginator = self.client.get_paginator("describe_volumes")
         page_iterator = paginator.paginate()
         for page in page_iterator:
             volumes.extend(page.get("Volumes", []))
         return volumes
 
-    def describe_elastic_ips(self) -> List[Dict[str, Any]]:
+    def describe_elastic_ips(self) -> list[dict[str, Any]]:
         response = self.client.describe_addresses()
-        addresses: List[Dict[str, Any]] = response.get("Addresses", [])
+        addresses: list[dict[str, Any]] = response.get("Addresses", [])
         return addresses
 
-    def describe_ec2_instances(self) -> List[Dict[str, Any]]:
-        instances: List[Dict[str, Any]] = []
+    def describe_ec2_instances(self) -> list[dict[str, Any]]:
+        instances: list[dict[str, Any]] = []
         paginator = self.client.get_paginator("describe_instances")
         page_iterator = paginator.paginate(
             Filters=[{"Name": "instance-state-name", "Values": ["stopped"]}]
@@ -53,15 +53,15 @@ class Boto3Gateway(CloudGateway):
                 instances.extend(reservation.get("Instances", []))
         return instances
 
-    def describe_ebs_snapshots(self) -> List[Dict[str, Any]]:
-        snapshots: List[Dict[str, Any]] = []
+    def describe_ebs_snapshots(self) -> list[dict[str, Any]]:
+        snapshots: list[dict[str, Any]] = []
         paginator = self.client.get_paginator("describe_snapshots")
         page_iterator = paginator.paginate(OwnerIds=['self'])
         for page in page_iterator:
             snapshots.extend(page.get("Snapshots", []))
         return snapshots
 
-    def execute(self, playbook: str, resource_id: str, dry_run: bool) -> Dict[str, Any]:
+    def execute(self, playbook: str, resource_id: str, dry_run: bool) -> dict[str, Any]:
         playbooks = {
             "release_eip": self._release_eip,
             "terminate_stopped_instance": self._terminate_stopped_instance,
@@ -78,17 +78,17 @@ class Boto3Gateway(CloudGateway):
 
         return impl(resource_id)
 
-    def _release_eip(self, allocation_id: str) -> Dict[str, Any]:
+    def _release_eip(self, allocation_id: str) -> dict[str, Any]:
         logger.info("Releasing Elastic IP: %s", allocation_id)
         self.client.release_address(AllocationId=allocation_id)
         return {"released": allocation_id}
 
-    def _terminate_stopped_instance(self, instance_id: str) -> Dict[str, Any]:
+    def _terminate_stopped_instance(self, instance_id: str) -> dict[str, Any]:
         logger.info("Terminating EC2 instance: %s", instance_id)
         self.client.terminate_instances(InstanceIds=[instance_id])
         return {"terminated": instance_id}
 
-    def _snapshot_then_delete_volume(self, volume_id: str) -> Dict[str, Any]:
+    def _snapshot_then_delete_volume(self, volume_id: str) -> dict[str, Any]:
         logger.info("Creating snapshot for EBS volume: %s", volume_id)
         response = self.client.create_snapshot(
             VolumeId=volume_id,
@@ -104,7 +104,7 @@ class Boto3Gateway(CloudGateway):
         self.client.delete_volume(VolumeId=volume_id)
         return {"snapshot_id": snapshot_id, "deleted_volume": volume_id}
 
-    def _delete_ebs_snapshot(self, snapshot_id: str) -> Dict[str, Any]:
+    def _delete_ebs_snapshot(self, snapshot_id: str) -> dict[str, Any]:
         logger.info("Deleting EBS snapshot: %s", snapshot_id)
         self.client.delete_snapshot(SnapshotId=snapshot_id)
         return {"deleted_snapshot": snapshot_id}
