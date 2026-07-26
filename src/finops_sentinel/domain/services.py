@@ -6,16 +6,16 @@ consulting TRANSITIONS, the repository executes it atomically. Every
 meaningful event is appended to the audit log.
 """
 from datetime import UTC, datetime, timedelta
-from typing import Any, List
+from typing import Any
 
 from finops_sentinel.domain import rules
 from finops_sentinel.domain.models import (
+    TRANSITIONS,
     AuditEvent,
     Decision,
     Finding,
     FindingStatus,
     ResourceLifecycle,
-    TRANSITIONS,
 )
 from finops_sentinel.ports.cloud import CloudGateway
 from finops_sentinel.ports.notifier import Notifier
@@ -36,8 +36,8 @@ def _audit(
 def run_scan(
     gateway: CloudGateway,
     repo: FindingsRepository,
-    scanners: List[Scanner],
-) -> List[Finding]:
+    scanners: list[Scanner],
+) -> list[Finding]:
     """
     Orchestrates the Two-Pass Scan:
     Pass 1: Discover inventory (Resources) and upsert to repository. Unseen resources marked DELETED.
@@ -49,7 +49,7 @@ def run_scan(
     """
     scan_start_time = datetime.now(UTC)
 
-    discovered_resources: List[tuple[Any, dict[str, Any]]] = []
+    discovered_resources: list[tuple[Any, dict[str, Any]]] = []
     for scanner in scanners:
         scanner_resources = scanner.discover(gateway)
         discovered_resources.extend(scanner_resources)
@@ -59,7 +59,7 @@ def run_scan(
 
     repo.mark_unseen_resources_deleted(scan_start_time)
 
-    all_findings: List[Finding] = []
+    all_findings: list[Finding] = []
     for scanner in scanners:
         findings = scanner.evaluate(discovered_resources)
         all_findings.extend(findings)
@@ -76,13 +76,13 @@ def run_scan(
     return all_findings
 
 
-def notify_open_findings(repo: FindingsRepository, notifier: Notifier) -> List[Finding]:
+def notify_open_findings(repo: FindingsRepository, notifier: Notifier) -> list[Finding]:
     """
     Send alerts for OPEN, non-protected findings and transition them to
     NOTIFIED. Protected findings are never notified and never leave OPEN.
     A failed send leaves the finding OPEN so the next scan retries it.
     """
-    notified: List[Finding] = []
+    notified: list[Finding] = []
     for finding in repo.get_findings(status=FindingStatus.OPEN):
         if finding.protected:
             continue
@@ -261,14 +261,14 @@ def deny_finding(
     return True
 
 
-def expire_stale(repo: FindingsRepository, max_age_hours: int = EXPIRY_HOURS) -> List[str]:
+def expire_stale(repo: FindingsRepository, max_age_hours: int = EXPIRY_HOURS) -> list[str]:
     """
     Expire NOTIFIED findings whose latest notification is older than
     max_age_hours. Findings notified before notification tracking existed
     fall back to detected_at. Returns the ids expired.
     """
     cutoff = datetime.now(UTC) - timedelta(hours=max_age_hours)
-    expired: List[str] = []
+    expired: list[str] = []
 
     for finding in repo.get_findings(status=FindingStatus.NOTIFIED):
         notified_at = repo.get_latest_notification_time(finding.id) or finding.detected_at

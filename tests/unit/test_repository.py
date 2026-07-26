@@ -1,25 +1,31 @@
-from datetime import datetime, UTC, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from finops_sentinel.domain.models import (
-    AuditEvent, Decision, Finding, Resource, FindingStatus, ResourceLifecycle, ResourceType
+    AuditEvent,
+    Decision,
+    Finding,
+    FindingStatus,
+    Resource,
+    ResourceLifecycle,
+    ResourceType,
 )
 
 
 def make_finding(finding_id="f-1", status=FindingStatus.OPEN, **overrides):
     now = datetime.now(UTC)
-    defaults = dict(
-        id=finding_id,
-        resource_ref="res-1",
-        rule="test_rule",
-        evidence={},
-        tags_at_detection={},
-        est_monthly_cost_usd=Decimal("10.00"),
-        status=status,
-        protected=False,
-        detected_at=now,
-        last_seen_at=now,
-    )
+    defaults = {
+        "id": finding_id,
+        "resource_ref": "res-1",
+        "rule": "test_rule",
+        "evidence": {},
+        "tags_at_detection": {},
+        "est_monthly_cost_usd": Decimal("10.00"),
+        "status": status,
+        "protected": False,
+        "detected_at": now,
+        "last_seen_at": now,
+    }
     defaults.update(overrides)
     return Finding(**defaults)
 

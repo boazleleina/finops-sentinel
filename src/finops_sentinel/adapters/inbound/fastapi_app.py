@@ -1,7 +1,7 @@
 """Inbound FastAPI adapter. Routes are thin: parse input, call a domain
 service, format output. Channel-specific callback logic (signatures, payload
 shape) lives in the configured Notifier adapter, not here."""
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
@@ -27,22 +27,22 @@ class DecisionResponse(BaseModel):
 
 
 @app.get("/health")
-def health_check() -> Dict[str, str]:
+def health_check() -> dict[str, str]:
     return {"status": "ok"}
 
 
 @app.get("/findings")
-def list_findings(status: Optional[FindingStatus] = None) -> List[Finding]:
+def list_findings(status: FindingStatus | None = None) -> list[Finding]:
     return get_repository().get_findings(status=status)
 
 
 @app.get("/resources")
-def list_resources() -> List[Resource]:
+def list_resources() -> list[Resource]:
     return get_repository().get_all_resources()
 
 
 @app.get("/audit")
-def list_audit_events(finding_id: Optional[str] = None) -> List[AuditEvent]:
+def list_audit_events(finding_id: str | None = None) -> list[AuditEvent]:
     return get_repository().get_audit_events(finding_id=finding_id)
 
 
@@ -82,7 +82,7 @@ def post_decision(finding_id: str, body: DecisionRequest) -> DecisionResponse:
 
 
 @app.post("/callbacks/{channel}")
-async def notifier_callback(channel: str, request: Request) -> Dict[str, Any]:
+async def notifier_callback(channel: str, request: Request) -> dict[str, Any]:
     """
     Webhook endpoint for interactive decision callbacks (e.g. Slack buttons).
     The raw payload is handed to the configured Notifier adapter, which
@@ -104,7 +104,7 @@ async def notifier_callback(channel: str, request: Request) -> Dict[str, Any]:
         success = _decide(
             decision.finding_id, decision.action, actor=decision.actor, channel=channel
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 — any playbook failure must produce a clean Slack reply, not a 500
         # Playbook failed mid-remediation; the service already recorded
         # FAILED plus the audit/remediation rows. Reply cleanly instead of 500.
         outcome = (

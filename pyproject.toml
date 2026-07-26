@@ -25,7 +25,7 @@ dev = [
     "pytest>=8.0.0",
     "pytest-cov>=4.1.0",
     "pytest-mock>=3.12.0",
-    "ruff>=0.1.0",
+    "ruff>=0.16,<0.17",
     "mypy>=1.8.0",
     "moto[ec2]>=5.0.0",
     "httpx>=0.24.0",
@@ -40,6 +40,11 @@ build-backend = "hatchling.build"
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.ruff.lint.per-file-ignores]
+# Integration tests use blind excepts deliberately: LocalStack availability
+# probe and best-effort resource cleanup must never raise.
+"tests/**" = ["BLE001", "S110"]
 
 # Ports & adapters enforcement: dependencies point inward.
 # domain/ imports nothing external (pydantic only); adapters import domain,

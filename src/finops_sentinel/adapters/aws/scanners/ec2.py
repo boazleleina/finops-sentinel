@@ -2,7 +2,7 @@ import re
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, List, Optional, Tuple
+from typing import Any
 
 from finops_sentinel.domain.models import (
     Finding,
@@ -20,7 +20,7 @@ from finops_sentinel.ports.scanner import Scanner
 _STOP_TIME_RE = re.compile(r"\((\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
 
 
-def parse_stop_time(state_transition_reason: str | None) -> Optional[datetime]:
+def parse_stop_time(state_transition_reason: str | None) -> datetime | None:
     if not state_transition_reason:
         return None
     match = _STOP_TIME_RE.search(state_transition_reason)
@@ -38,7 +38,7 @@ class StoppedEC2Scanner(Scanner):
         self.region = region
         self.threshold_days = threshold_days
 
-    def discover(self, gateway: CloudGateway) -> List[Tuple[Resource, dict[str, Any]]]:
+    def discover(self, gateway: CloudGateway) -> list[tuple[Resource, dict[str, Any]]]:
         discovered = []
         instances = gateway.describe_ec2_instances()
         now = datetime.now(UTC)
@@ -65,7 +65,7 @@ class StoppedEC2Scanner(Scanner):
 
         return discovered
 
-    def evaluate(self, resources: List[Tuple[Resource, dict[str, Any]]]) -> List[Finding]:
+    def evaluate(self, resources: list[tuple[Resource, dict[str, Any]]]) -> list[Finding]:
         findings = []
         now = datetime.now(UTC)
 
@@ -73,7 +73,7 @@ class StoppedEC2Scanner(Scanner):
             if resource.resource_type != ResourceType.EC2_INSTANCE:
                 continue
 
-            stopped_days: Optional[int]
+            stopped_days: int | None
             stopped_at = parse_stop_time(instance.get("StateTransitionReason"))
             if stopped_at is not None:
                 stopped_days = (now - stopped_at).days

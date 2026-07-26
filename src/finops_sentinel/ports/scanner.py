@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any, List
+from typing import Any
 
 from finops_sentinel.domain.models import Finding, Resource
 from finops_sentinel.ports.cloud import CloudGateway
@@ -11,7 +11,7 @@ class Scanner(ABC):
     """
 
     @abstractmethod
-    def discover(self, gateway: CloudGateway) -> List[tuple[Resource, dict[str, Any]]]:
+    def discover(self, gateway: CloudGateway) -> list[tuple[Resource, dict[str, Any]]]:
         """
         Pass 1: Discover resources from the cloud provider.
         Returns a tuple of the Domain Resource and the raw cloud provider dictionary.
@@ -19,7 +19,7 @@ class Scanner(ABC):
         ...  # pragma: no cover
 
     @abstractmethod
-    def evaluate(self, resources: List[tuple[Resource, dict[str, Any]]]) -> List[Finding]:
+    def evaluate(self, resources: list[tuple[Resource, dict[str, Any]]]) -> list[Finding]:
         """
         Pass 2: Evaluate a list of resources to generate findings.
         """

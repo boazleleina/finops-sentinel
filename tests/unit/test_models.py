@@ -1,11 +1,18 @@
-import pytest
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from decimal import Decimal
+
+import pytest
 from pydantic import ValidationError
 
 from finops_sentinel.domain.models import (
-    Finding, Resource, FindingStatus, ResourceLifecycle, ResourceType, TRANSITIONS
+    TRANSITIONS,
+    Finding,
+    FindingStatus,
+    Resource,
+    ResourceLifecycle,
+    ResourceType,
 )
+
 
 def test_finding_state_transitions():
     """Verify that the TRANSITIONS dictionary correctly defines the state machine."""
