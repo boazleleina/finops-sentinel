@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
-from typing import Any, Mapping, Optional
+from collections.abc import Mapping
+from typing import Any
 
 from finops_sentinel.domain.models import Decision, Finding, Resource
 
@@ -18,7 +19,7 @@ class Notifier(ABC):
         ...  # pragma: no cover
 
     @abstractmethod
-    def send_finding_alert(self, finding: Finding, resource: Resource) -> Optional[str]:
+    def send_finding_alert(self, finding: Finding, resource: Resource) -> str | None:
         """
         Send an interactive alert for a finding. Returns a message reference
         usable to edit the message later, or None if the transport has none.

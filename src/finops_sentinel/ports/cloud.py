@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List
+from typing import Any
 
 
 class CloudGateway(ABC):
@@ -9,23 +9,23 @@ class CloudGateway(ABC):
     """
 
     @abstractmethod
-    def describe_ebs_volumes(self) -> List[Dict[str, Any]]:
+    def describe_ebs_volumes(self) -> list[dict[str, Any]]:
         ...  # pragma: no cover
 
     @abstractmethod
-    def describe_elastic_ips(self) -> List[Dict[str, Any]]:
+    def describe_elastic_ips(self) -> list[dict[str, Any]]:
         ...  # pragma: no cover
 
     @abstractmethod
-    def describe_ec2_instances(self) -> List[Dict[str, Any]]:
+    def describe_ec2_instances(self) -> list[dict[str, Any]]:
         ...  # pragma: no cover
 
     @abstractmethod
-    def describe_ebs_snapshots(self) -> List[Dict[str, Any]]:
+    def describe_ebs_snapshots(self) -> list[dict[str, Any]]:
         ...  # pragma: no cover
 
     @abstractmethod
-    def execute(self, playbook: str, resource_id: str, dry_run: bool) -> Dict[str, Any]:
+    def execute(self, playbook: str, resource_id: str, dry_run: bool) -> dict[str, Any]:
         """
         Execute a named remediation playbook against a resource.
 

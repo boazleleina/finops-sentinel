@@ -1,11 +1,19 @@
 import uuid
-from typing import Any, List, Tuple
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
+
+from finops_sentinel.domain.models import (
+    Finding,
+    FindingStatus,
+    Resource,
+    ResourceLifecycle,
+    ResourceType,
+)
 from finops_sentinel.domain.rules import is_protected as tag_is_protected
-from finops_sentinel.ports.scanner import Scanner
-from finops_sentinel.domain.models import Finding, Resource, ResourceType, ResourceLifecycle, FindingStatus
 from finops_sentinel.ports.cloud import CloudGateway
+from finops_sentinel.ports.scanner import Scanner
+
 
 class UnattachedEBSScanner(Scanner):
     
@@ -14,7 +22,7 @@ class UnattachedEBSScanner(Scanner):
         self.gp2_price = Decimal(str(gp2_price))
         self.gp3_price = Decimal(str(gp3_price))
 
-    def discover(self, gateway: CloudGateway) -> List[Tuple[Resource, dict[str, Any]]]:
+    def discover(self, gateway: CloudGateway) -> list[tuple[Resource, dict[str, Any]]]:
         discovered = []
         volumes = gateway.describe_ebs_volumes()
         now = datetime.now(UTC)
@@ -41,7 +49,7 @@ class UnattachedEBSScanner(Scanner):
                 
         return discovered
 
-    def evaluate(self, resources: List[Tuple[Resource, dict[str, Any]]]) -> List[Finding]:
+    def evaluate(self, resources: list[tuple[Resource, dict[str, Any]]]) -> list[Finding]:
         findings = []
         now = datetime.now(UTC)
         

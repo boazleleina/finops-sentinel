@@ -1,11 +1,13 @@
-from datetime import datetime, UTC, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+
+from finops_sentinel.adapters.aws.gateway import Boto3Gateway
 from finops_sentinel.adapters.aws.scanners.ebs import UnattachedEBSScanner
 from finops_sentinel.adapters.aws.scanners.ebs_snapshots import OldEbsSnapshotScanner
-from finops_sentinel.adapters.aws.scanners.eip import OrphanedEIPScanner
 from finops_sentinel.adapters.aws.scanners.ec2 import StoppedEC2Scanner, parse_stop_time
-from finops_sentinel.adapters.aws.gateway import Boto3Gateway
+from finops_sentinel.adapters.aws.scanners.eip import OrphanedEIPScanner
 from finops_sentinel.domain.models import Resource, ResourceLifecycle, ResourceType
+
 
 def test_ebs_scanner(mock_aws_env):
     """Test EBS scanner discover and evaluate passes."""

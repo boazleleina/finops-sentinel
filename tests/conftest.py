@@ -5,11 +5,13 @@ import os
 # and drown out the snapshots our tests create.
 os.environ["MOTO_EC2_LOAD_DEFAULT_AMIS"] = "false"
 
-import pytest
 import boto3
+import pytest
 from moto import mock_aws
-from finops_sentinel.adapters.persistence.sqlalchemy_repo import SqlAlchemyRepository, Base
+
+from finops_sentinel.adapters.persistence.sqlalchemy_repo import Base, SqlAlchemyRepository
 from finops_sentinel.config import settings
+
 
 @pytest.fixture(autouse=True)
 def aws_credentials():

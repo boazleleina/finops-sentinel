@@ -1,5 +1,6 @@
 import logging
-from typing import Any, Mapping, Optional
+from collections.abc import Mapping
+from typing import Any
 
 from finops_sentinel.domain.models import Decision, Finding, Resource
 from finops_sentinel.ports.notifier import Notifier
@@ -18,7 +19,7 @@ class ConsoleNotifier(Notifier):
     def channel_name(self) -> str:
         return "console"
 
-    def send_finding_alert(self, finding: Finding, resource: Resource) -> Optional[str]:
+    def send_finding_alert(self, finding: Finding, resource: Resource) -> str | None:
         logger.info(
             "FinOps alert: %s on %s (~$%s/mo). Decide via POST /decisions/%s",
             finding.rule,

@@ -1,7 +1,7 @@
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, List, Optional
+from typing import Any
 
 from sqlalchemy import (
     Boolean,
@@ -43,12 +43,12 @@ class SafeNumeric(TypeDecorator[Decimal]):
     impl = String
     cache_ok = True
 
-    def process_bind_param(self, value: Optional[Decimal], dialect: Dialect) -> Optional[str]:
+    def process_bind_param(self, value: Decimal | None, dialect: Dialect) -> str | None:
         if value is not None:
             return str(value)
         return None
 
-    def process_result_value(self, value: Optional[str], dialect: Dialect) -> Optional[Decimal]:
+    def process_result_value(self, value: str | None, dialect: Dialect) -> Decimal | None:
         if value is not None:
             return Decimal(value)
         return None
@@ -93,7 +93,7 @@ class FindingModel(Base):
     evidence: Mapped[str] = mapped_column(String)  # JSON
     tags_at_detection: Mapped[str] = mapped_column(String)  # JSON
     est_monthly_cost_usd: Mapped[Decimal] = mapped_column(SafeNumeric)
-    llm_summary: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    llm_summary: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, index=True)
     protected: Mapped[bool] = mapped_column(Boolean)
     detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -127,7 +127,7 @@ class AuditEventModel(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     event: Mapped[str] = mapped_column(String)
-    finding_id: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
+    finding_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     detail: Mapped[str] = mapped_column(String)  # JSON
 
 
@@ -137,7 +137,7 @@ class NotificationModel(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     finding_id: Mapped[str] = mapped_column(String, index=True)
     channel: Mapped[str] = mapped_column(String)
-    message_ref: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    message_ref: Mapped[str | None] = mapped_column(String, nullable=True)
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
@@ -220,7 +220,7 @@ class SqlAlchemyRepository(FindingsRepository):
         finally:
             db.close()
 
-    def get_resource_by_id(self, resource_id: str) -> Optional[Resource]:
+    def get_resource_by_id(self, resource_id: str) -> Resource | None:
         db = self.SessionLocal()
         try:
             db_res = db.query(ResourceModel).filter(ResourceModel.id == resource_id).first()
@@ -230,7 +230,7 @@ class SqlAlchemyRepository(FindingsRepository):
         finally:
             db.close()
 
-    def get_all_resources(self) -> List[Resource]:
+    def get_all_resources(self) -> list[Resource]:
         db = self.SessionLocal()
         try:
             return [_to_resource(db_res) for db_res in db.query(ResourceModel).all()]
@@ -304,7 +304,7 @@ class SqlAlchemyRepository(FindingsRepository):
         finally:
             db.close()
 
-    def get_findings(self, status: Optional[FindingStatus] = None) -> List[Finding]:
+    def get_findings(self, status: FindingStatus | None = None) -> list[Finding]:
         db = self.SessionLocal()
         try:
             query = db.query(FindingModel)
@@ -314,7 +314,7 @@ class SqlAlchemyRepository(FindingsRepository):
         finally:
             db.close()
 
-    def get_finding_by_id(self, finding_id: str) -> Optional[Finding]:
+    def get_finding_by_id(self, finding_id: str) -> Finding | None:
         db = self.SessionLocal()
         try:
             db_f = db.query(FindingModel).filter(FindingModel.id == finding_id).first()
@@ -355,7 +355,7 @@ class SqlAlchemyRepository(FindingsRepository):
         finally:
             db.close()
 
-    def get_audit_events(self, finding_id: Optional[str] = None) -> List[AuditEvent]:
+    def get_audit_events(self, finding_id: str | None = None) -> list[AuditEvent]:
         db = self.SessionLocal()
         try:
             query = db.query(AuditEventModel).order_by(AuditEventModel.id)
@@ -374,7 +374,7 @@ class SqlAlchemyRepository(FindingsRepository):
             db.close()
 
     def record_notification(
-        self, finding_id: str, channel: str, message_ref: Optional[str], sent_at: datetime
+        self, finding_id: str, channel: str, message_ref: str | None, sent_at: datetime
     ) -> None:
         db = self.SessionLocal()
         try:
@@ -390,7 +390,7 @@ class SqlAlchemyRepository(FindingsRepository):
         finally:
             db.close()
 
-    def get_latest_notification_time(self, finding_id: str) -> Optional[datetime]:
+    def get_latest_notification_time(self, finding_id: str) -> datetime | None:
         db = self.SessionLocal()
         try:
             row = (
