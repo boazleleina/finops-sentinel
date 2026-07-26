@@ -32,7 +32,7 @@ class Boto3Gateway(CloudGateway):
     def describe_ebs_volumes(self) -> List[Dict[str, Any]]:
         volumes: List[Dict[str, Any]] = []
         paginator = self.client.get_paginator("describe_volumes")
-        page_iterator = paginator.paginate(Filters=[{"Name": "status", "Values": ["available"]}])
+        page_iterator = paginator.paginate()
         for page in page_iterator:
             volumes.extend(page.get("Volumes", []))
         return volumes
@@ -53,11 +53,20 @@ class Boto3Gateway(CloudGateway):
                 instances.extend(reservation.get("Instances", []))
         return instances
 
+    def describe_ebs_snapshots(self) -> List[Dict[str, Any]]:
+        snapshots: List[Dict[str, Any]] = []
+        paginator = self.client.get_paginator("describe_snapshots")
+        page_iterator = paginator.paginate(OwnerIds=['self'])
+        for page in page_iterator:
+            snapshots.extend(page.get("Snapshots", []))
+        return snapshots
+
     def execute(self, playbook: str, resource_id: str, dry_run: bool) -> Dict[str, Any]:
         playbooks = {
             "release_eip": self._release_eip,
             "terminate_stopped_instance": self._terminate_stopped_instance,
             "snapshot_then_delete_volume": self._snapshot_then_delete_volume,
+            "delete_ebs_snapshot": self._delete_ebs_snapshot,
         }
         impl = playbooks.get(playbook)
         if impl is None:
@@ -94,3 +103,8 @@ class Boto3Gateway(CloudGateway):
         logger.info("Snapshot %s complete. Deleting volume: %s", snapshot_id, volume_id)
         self.client.delete_volume(VolumeId=volume_id)
         return {"snapshot_id": snapshot_id, "deleted_volume": volume_id}
+
+    def _delete_ebs_snapshot(self, snapshot_id: str) -> Dict[str, Any]:
+        logger.info("Deleting EBS snapshot: %s", snapshot_id)
+        self.client.delete_snapshot(SnapshotId=snapshot_id)
+        return {"deleted_snapshot": snapshot_id}

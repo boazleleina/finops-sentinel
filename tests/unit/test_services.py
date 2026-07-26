@@ -53,6 +53,7 @@ class FakeCloudGateway(CloudGateway):
     def describe_ebs_volumes(self): return []
     def describe_elastic_ips(self): return []
     def describe_ec2_instances(self): return []
+    def describe_ebs_snapshots(self): return []
 
     def execute(self, playbook, resource_id, dry_run):
         if self.fail:

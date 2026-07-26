@@ -23,8 +23,12 @@ class Settings(BaseSettings):
     # $0.005 per hour per IP. 730 hours/month * 0.005 = 3.65
     eip_price_per_month: float = 3.65
     
+    # Source: https://aws.amazon.com/ebs/pricing/ (Snapshots are $0.05/GB-month for standard)
+    snapshot_price_per_gb_month: float = 0.05
+
     # Thresholds
     stopped_ec2_threshold_days: int = 7
+    snapshot_age_threshold_days: int = 30
     
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

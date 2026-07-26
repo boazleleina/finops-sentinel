@@ -1,9 +1,11 @@
+from datetime import datetime, UTC, timedelta
 from decimal import Decimal
 from finops_sentinel.adapters.aws.scanners.ebs import UnattachedEBSScanner
+from finops_sentinel.adapters.aws.scanners.ebs_snapshots import OldEbsSnapshotScanner
 from finops_sentinel.adapters.aws.scanners.eip import OrphanedEIPScanner
-from finops_sentinel.adapters.aws.scanners.ec2 import StoppedEC2Scanner
+from finops_sentinel.adapters.aws.scanners.ec2 import StoppedEC2Scanner, parse_stop_time
 from finops_sentinel.adapters.aws.gateway import Boto3Gateway
-from finops_sentinel.domain.models import ResourceType
+from finops_sentinel.domain.models import Resource, ResourceLifecycle, ResourceType
 
 def test_ebs_scanner(mock_aws_env):
     """Test EBS scanner discover and evaluate passes."""
@@ -95,10 +97,6 @@ def test_ec2_scanner(mock_aws_env):
 
 def test_ec2_scanner_threshold(mock_aws_env):
     """Instances stopped less than threshold_days ago are not flagged."""
-    from datetime import datetime, UTC, timedelta
-    from finops_sentinel.adapters.aws.scanners.ec2 import parse_stop_time
-    from finops_sentinel.domain.models import Resource, ResourceLifecycle
-
     def instance_tuple(instance_id, stopped_at):
         now = datetime.now(UTC)
         resource = Resource(
@@ -128,3 +126,53 @@ def test_ec2_scanner_threshold(mock_aws_env):
     assert parse_stop_time("User initiated (2026-07-01 12:00:00 GMT)") is not None
     assert parse_stop_time("") is None
     assert parse_stop_time("weird string") is None
+
+def test_ebs_snapshot_scanner(mock_aws_env):
+    ec2 = mock_aws_env
+    
+    # 1. Live volume with fresh snapshot
+    vol_live = ec2.create_volume(AvailabilityZone="us-east-1a", Size=10, VolumeType="gp3")
+    snap_live_fresh = ec2.create_snapshot(VolumeId=vol_live["VolumeId"])
+    
+    # 2. Deleted volume with fresh snapshot (orphaned)
+    vol_del = ec2.create_volume(AvailabilityZone="us-east-1a", Size=10, VolumeType="gp3")
+    snap_orphaned = ec2.create_snapshot(VolumeId=vol_del["VolumeId"])
+    ec2.delete_volume(VolumeId=vol_del["VolumeId"])
+    
+    # 3. Live volume with protected fresh snapshot (orphaned)
+    vol_prot = ec2.create_volume(AvailabilityZone="us-east-1a", Size=10, VolumeType="gp3")
+    snap_protected = ec2.create_snapshot(
+        VolumeId=vol_prot["VolumeId"],
+        TagSpecifications=[{'ResourceType': 'snapshot', 'Tags': [{'Key': 'finops:protected', 'Value': 'true'}]}]
+    )
+    ec2.delete_volume(VolumeId=vol_prot["VolumeId"])
+    
+    gateway = Boto3Gateway(region="us-east-1")
+    scanner = OldEbsSnapshotScanner(region="us-east-1", snapshot_price=0.05, age_threshold_days=30)
+    
+    vol_scanner = UnattachedEBSScanner(region="us-east-1", gp2_price=0.1, gp3_price=0.08)
+    vol_resources = vol_scanner.discover(gateway)
+    
+    snap_resources = scanner.discover(gateway)
+    
+    # Force one snapshot to be old
+    old_snap_id = snap_live_fresh["SnapshotId"]
+    for res, raw in snap_resources:
+        if raw["SnapshotId"] == old_snap_id:
+            raw["StartTime"] = datetime.now(UTC) - timedelta(days=40)
+            
+    all_resources = vol_resources + snap_resources
+    findings = scanner.evaluate(all_resources)
+    
+    assert len(findings) == 3
+    
+    flagged_snap_ids = {f.evidence["SnapshotId"]: f for f in findings}
+    
+    assert old_snap_id in flagged_snap_ids
+    assert not flagged_snap_ids[old_snap_id].protected
+    
+    assert snap_orphaned["SnapshotId"] in flagged_snap_ids
+    assert not flagged_snap_ids[snap_orphaned["SnapshotId"]].protected
+    
+    assert snap_protected["SnapshotId"] in flagged_snap_ids
+    assert flagged_snap_ids[snap_protected["SnapshotId"]].protected

@@ -22,5 +22,4 @@ def test_playbook_allowlist_covers_remediable_types_only():
     assert PLAYBOOK_ALLOWLIST[ResourceType.EBS_VOLUME] == "snapshot_then_delete_volume"
     assert PLAYBOOK_ALLOWLIST[ResourceType.ELASTIC_IP] == "release_eip"
     assert PLAYBOOK_ALLOWLIST[ResourceType.EC2_INSTANCE] == "terminate_stopped_instance"
-    # Snapshots are inventory-only in v1 — no playbook, so never remediable.
-    assert ResourceType.EBS_SNAPSHOT not in PLAYBOOK_ALLOWLIST
+    assert PLAYBOOK_ALLOWLIST[ResourceType.EBS_SNAPSHOT] == "delete_ebs_snapshot"
