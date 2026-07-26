@@ -15,22 +15,43 @@ class Settings(BaseSettings):
     # Path to the local SQLite database for finding persistence
     sentinel_db_path: str = ".sentinel.db"
     
-    # Static pricing table for cost estimation (based on us-east-1 standard pricing)
-    # Source: https://aws.amazon.com/ebs/pricing/
-    gp3_price_per_gb_month: float = 0.08
-    gp2_price_per_gb_month: float = 0.10
-    
-    # Source: https://aws.amazon.com/vpc/pricing/ (Public IPv4 addresses)
-    # $0.005 per hour per IP. 730 hours/month * 0.005 = 3.65
-    eip_price_per_month: float = 3.65
-    
-    # Source: https://aws.amazon.com/ebs/pricing/ (Snapshots are $0.05/GB-month for standard)
-    snapshot_price_per_gb_month: float = 0.05
+    # Prices are NOT configured here. Every rate lives in one place:
+    # adapters/aws/pricing.py, behind the Pricing port, with sources cited.
+    # That keeps a live pricing adapter a drop-in replacement.
 
     # Thresholds
     stopped_ec2_threshold_days: int = 7
     snapshot_age_threshold_days: int = 30
-    
+
+    # LLM Advisor. Which backend implements the Advisor port; see
+    # bootstrap.ADVISOR_PROVIDERS for the registered names. "template" needs no
+    # model at all and is the safe fallback everything else degrades to.
+    advisor_provider: str = "ollama"
+
+    # Ollama settings. It runs natively on the host: Docker on Apple Silicon
+    # has no GPU passthrough, so a containerized Ollama would be CPU-only.
+    # From inside the app container the host daemon is host.docker.internal.
+    # Swapping models is just OLLAMA_MODEL — any tag `ollama list` shows works.
+    ollama_base_url: str = "http://localhost:11434"
+    # Primary model. The 30b MoE activates ~3B params per token, so it runs at
+    # roughly 8b latency on a 64GB unified-memory Mac. Set OLLAMA_MODEL to
+    # qwen3:8b on smaller hosts (or in CI) — any tag `ollama list` shows works.
+    ollama_model: str = "qwen3:30b-a3b"
+    ollama_timeout_seconds: float = 30.0
+    # Max LLM calls per notify pass, spent on the costliest findings first.
+    # Local inference is seconds per finding, so an account with hundreds of
+    # findings would otherwise make `sentinel scan` run for hours.
+    advisor_max_findings_per_scan: int = 25
+
+    # Idle EC2 detection: an instance is idle only if BOTH average CPU and
+    # average network throughput stay under threshold for the whole window.
+    ec2_idle_observation_days: int = 14
+    ec2_idle_cpu_percent: float = 5.0
+    ec2_idle_network_bytes: float = 1_000_000.0
+    # Refuse to judge an instance on a near-empty metric series (just-launched
+    # instances, or CloudWatch gaps) — too few datapoints means no verdict.
+    ec2_idle_min_datapoints: int = 24
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 settings = Settings()

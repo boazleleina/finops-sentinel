@@ -15,6 +15,7 @@ dependencies = [
     "uvicorn>=0.20.0",
     "slack_sdk>=3.20.0",
     "python-multipart>=0.0.9",
+    "httpx>=0.24.0",
 ]
 
 [project.scripts]
@@ -27,10 +28,10 @@ dev = [
     "pytest-mock>=3.12.0",
     "ruff>=0.16,<0.17",
     "mypy>=1.8.0",
-    "moto[ec2]>=5.0.0",
-    "httpx>=0.24.0",
+    "moto[ec2,cloudwatch]>=5.0.0",
     "pytest-asyncio>=0.21.0",
     "import-linter>=2.0",
+    "respx>=0.20.0",
 ]
 
 [build-system]

@@ -1,6 +1,5 @@
 import uuid
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from typing import Any
 
 from finops_sentinel.domain.models import (
@@ -12,14 +11,15 @@ from finops_sentinel.domain.models import (
 )
 from finops_sentinel.domain.rules import is_protected as tag_is_protected
 from finops_sentinel.ports.cloud import CloudGateway
+from finops_sentinel.ports.pricing import Pricing
 from finops_sentinel.ports.scanner import Scanner
 
 
 class OldEbsSnapshotScanner(Scanner):
     
-    def __init__(self, region: str, snapshot_price: float, age_threshold_days: int):
+    def __init__(self, region: str, pricing: Pricing, age_threshold_days: int):
         self.region = region
-        self.snapshot_price = Decimal(str(snapshot_price))
+        self.pricing = pricing
         self.age_threshold_days = age_threshold_days
 
     def discover(self, gateway: CloudGateway) -> list[tuple[Resource, dict[str, Any]]]:
@@ -81,8 +81,9 @@ class OldEbsSnapshotScanner(Scanner):
             if not (is_old or is_orphaned):
                 continue
                 
-            size_gb = Decimal(str(snap['VolumeSize']))
-            savings = size_gb * self.snapshot_price
+            savings = self.pricing.ebs_snapshot_monthly(
+                size_gb=int(snap['VolumeSize']), region=resource.region
+            )
             
             is_protected = tag_is_protected(resource.current_tags)
             

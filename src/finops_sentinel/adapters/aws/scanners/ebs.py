@@ -1,6 +1,5 @@
 import uuid
 from datetime import UTC, datetime
-from decimal import Decimal
 from typing import Any
 
 from finops_sentinel.domain.models import (
@@ -12,15 +11,15 @@ from finops_sentinel.domain.models import (
 )
 from finops_sentinel.domain.rules import is_protected as tag_is_protected
 from finops_sentinel.ports.cloud import CloudGateway
+from finops_sentinel.ports.pricing import Pricing
 from finops_sentinel.ports.scanner import Scanner
 
 
 class UnattachedEBSScanner(Scanner):
     
-    def __init__(self, region: str, gp2_price: float, gp3_price: float):
+    def __init__(self, region: str, pricing: Pricing):
         self.region = region
-        self.gp2_price = Decimal(str(gp2_price))
-        self.gp3_price = Decimal(str(gp3_price))
+        self.pricing = pricing
 
     def discover(self, gateway: CloudGateway) -> list[tuple[Resource, dict[str, Any]]]:
         discovered = []
@@ -60,13 +59,13 @@ class UnattachedEBSScanner(Scanner):
             if volume.get('State') != 'available':
                 continue
                 
-            size_gb = Decimal(str(volume['Size']))
-            vol_type = volume.get('VolumeType', 'gp2')
-            
             is_protected = tag_is_protected(resource.current_tags)
-            
-            cost_per_gb = self.gp3_price if vol_type == 'gp3' else self.gp2_price
-            savings = size_gb * cost_per_gb
+
+            savings = self.pricing.ebs_volume_monthly(
+                volume_type=volume.get('VolumeType', 'gp2'),
+                size_gb=int(volume['Size']),
+                region=resource.region,
+            )
             
             finding = Finding(
                 id=f"ebs_unattached|{resource.resource_id}",

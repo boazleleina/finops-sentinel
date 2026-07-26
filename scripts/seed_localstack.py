@@ -4,6 +4,8 @@
 import os
 import sys
 import time
+from datetime import UTC, datetime, timedelta
+
 import boto3
 from botocore.exceptions import ClientError
 
@@ -96,7 +98,65 @@ def seed():
     ec2.delete_volume(VolumeId=vol3['VolumeId'])
     print(f"  Deleted temporary volume: {vol3['VolumeId']}")
 
+    # 5. Create a RUNNING but idle EC2 instance, plus the flat CloudWatch
+    # series the ec2_idle rule needs. LocalStack has no real instance metrics,
+    # so they are published explicitly.
+    print("Creating idle running EC2 instance...")
+    idle_reservation = ec2.run_instances(
+        ImageId="ami-0c55b159cbfafe1f0",
+        InstanceType="m5.large",
+        MinCount=1,
+        MaxCount=1,
+        TagSpecifications=[
+            {
+                'ResourceType': 'instance',
+                'Tags': [{'Key': 'Name', 'Value': 'idle-demo-worker'}]
+            }
+        ]
+    )
+    idle_id = idle_reservation['Instances'][0]['InstanceId']
+    print(f"  Created running instance: {idle_id}")
+
+    publish_idle_metrics(idle_id)
+
     print("Seeding complete!")
+
+
+def publish_idle_metrics(instance_id, days=14, interval_hours=6):
+    """Publish near-zero CPU/network so ec2_idle has enough datapoints.
+
+    The scanner refuses to judge a series shorter than its min_datapoints
+    (default 24), so this must span the whole observation window. Points are
+    spaced every interval_hours rather than hourly: LocalStack's query-protocol
+    parser rejects large PutMetricData bodies, and 56 points per metric already
+    clears the floor.
+    """
+    cloudwatch = boto3.client("cloudwatch", endpoint_url=ENDPOINT_URL)
+    now = datetime.now(UTC)
+    metrics = {"CPUUtilization": (0.4, "Percent"),
+               "NetworkIn": (900.0, "Bytes"),
+               "NetworkOut": (700.0, "Bytes")}
+
+    published = 0
+    for metric_name, (value, unit) in metrics.items():
+        batch = []
+        for step in range((days * 24) // interval_hours):
+            batch.append({
+                "MetricName": metric_name,
+                "Dimensions": [{"Name": "InstanceId", "Value": instance_id}],
+                "Timestamp": now - timedelta(hours=step * interval_hours),
+                "Value": value,
+                "Unit": unit,
+            })
+            if len(batch) == 20:
+                cloudwatch.put_metric_data(Namespace="AWS/EC2", MetricData=batch)
+                published += len(batch)
+                batch = []
+        if batch:
+            cloudwatch.put_metric_data(Namespace="AWS/EC2", MetricData=batch)
+            published += len(batch)
+
+    print(f"  Published {published} idle datapoints over {days} days")
 
 if __name__ == "__main__":
     try:
