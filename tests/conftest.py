@@ -1,4 +1,10 @@
 import os
+
+# Must be set before moto creates its EC2 backend: without it moto seeds
+# ~1200 default-AMI snapshots that are visible to describe_snapshots(OwnerIds=['self'])
+# and drown out the snapshots our tests create.
+os.environ["MOTO_EC2_LOAD_DEFAULT_AMIS"] = "false"
+
 import pytest
 import boto3
 from moto import mock_aws

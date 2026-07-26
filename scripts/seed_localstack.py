@@ -69,19 +69,32 @@ def seed():
     ec2.stop_instances(InstanceIds=[instance_id])
     print(f"  Stopped instance: {instance_id}")
     
-    # 4. Create 2 old EBS snapshots
-    print("Creating EBS snapshots...")
+    # 4. Create 2 orphaned EBS snapshots (from a third volume that gets deleted)
+    print("Creating orphaned EBS snapshots...")
+    vol3 = ec2.create_volume(
+        AvailabilityZone="us-east-1a",
+        Size=5,
+        VolumeType="gp3"
+    )
+    print(f"  Created temporary volume: {vol3['VolumeId']}")
+    
+    time.sleep(2)
+    
     snap1 = ec2.create_snapshot(
-        VolumeId=vol1['VolumeId'],
-        Description="Old snapshot 1"
+        VolumeId=vol3['VolumeId'],
+        Description="Orphaned snapshot 1"
     )
     print(f"  Created snapshot: {snap1['SnapshotId']}")
     
     snap2 = ec2.create_snapshot(
-        VolumeId=vol1['VolumeId'],
-        Description="Old snapshot 2"
+        VolumeId=vol3['VolumeId'],
+        Description="Orphaned snapshot 2"
     )
     print(f"  Created snapshot: {snap2['SnapshotId']}")
+
+    time.sleep(2)
+    ec2.delete_volume(VolumeId=vol3['VolumeId'])
+    print(f"  Deleted temporary volume: {vol3['VolumeId']}")
 
     print("Seeding complete!")
 

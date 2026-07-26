@@ -18,6 +18,7 @@ PLAYBOOK_ALLOWLIST: dict[ResourceType, str] = {
     ResourceType.EBS_VOLUME: "snapshot_then_delete_volume",
     ResourceType.ELASTIC_IP: "release_eip",
     ResourceType.EC2_INSTANCE: "terminate_stopped_instance",
+    ResourceType.EBS_SNAPSHOT: "delete_ebs_snapshot",
 }
 
 

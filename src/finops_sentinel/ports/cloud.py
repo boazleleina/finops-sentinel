@@ -21,6 +21,10 @@ class CloudGateway(ABC):
         ...  # pragma: no cover
 
     @abstractmethod
+    def describe_ebs_snapshots(self) -> List[Dict[str, Any]]:
+        ...  # pragma: no cover
+
+    @abstractmethod
     def execute(self, playbook: str, resource_id: str, dry_run: bool) -> Dict[str, Any]:
         """
         Execute a named remediation playbook against a resource.

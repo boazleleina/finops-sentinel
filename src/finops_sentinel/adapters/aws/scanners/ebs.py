@@ -49,8 +49,8 @@ class UnattachedEBSScanner(Scanner):
             if resource.resource_type != ResourceType.EBS_VOLUME:
                 continue
                 
-            # Filter condition from old scanner logic: describe_ebs_volumes already filters by 'available'
-            # If we changed describe_ebs_volumes to return all, we'd check `volume['State'] == 'available'` here.
+            if volume.get('State') != 'available':
+                continue
                 
             size_gb = Decimal(str(volume['Size']))
             vol_type = volume.get('VolumeType', 'gp2')

@@ -5,6 +5,7 @@ The ONLY file that knows which concrete adapters exist.
 from finops_sentinel.adapters.aws.gateway import Boto3Gateway
 from finops_sentinel.adapters.aws.scanners.ebs import UnattachedEBSScanner
 from finops_sentinel.adapters.aws.scanners.ec2 import StoppedEC2Scanner
+from finops_sentinel.adapters.aws.scanners.ebs_snapshots import OldEbsSnapshotScanner
 from finops_sentinel.adapters.aws.scanners.eip import OrphanedEIPScanner
 from finops_sentinel.adapters.notifications.console import ConsoleNotifier
 from finops_sentinel.adapters.notifications.slack import SlackAdapter
@@ -49,5 +50,10 @@ def get_scanners() -> list[Scanner]:
         StoppedEC2Scanner(
             region=settings.aws_region,
             threshold_days=settings.stopped_ec2_threshold_days,
+        ),
+        OldEbsSnapshotScanner(
+            region=settings.aws_region,
+            snapshot_price=settings.snapshot_price_per_gb_month,
+            age_threshold_days=settings.snapshot_age_threshold_days,
         ),
     ]

@@ -13,3 +13,22 @@ services:
     profiles:
       - dev
       - full
+
+  app:
+    build: .
+    depends_on:
+      - localstack
+    ports:
+      - "8000:8000"
+    environment:
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - SENTINEL_DB_PATH=/app/data/sentinel.db
+    env_file:
+      - .env
+    volumes:
+      # Mount a directory, not the db file itself: if the file doesn't exist
+      # yet, Docker would create a directory in its place and sqlite would fail.
+      - ./data:/app/data
+    profiles:
+      - dev
+      - full
