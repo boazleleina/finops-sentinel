@@ -54,6 +54,10 @@ class SlackAdapter(Notifier):
                         f"{header}\n\n"
                         f"*Rule:* {finding.rule}\n"
                         f"*Resource:* `{resource.resource_id}` ({resource.resource_type})\n"
+                        # Region is not decoration: with several regions
+                        # scanned, it is the first thing an approver needs to
+                        # know where to look, and remediation runs there.
+                        f"*Region:* `{resource.region}`\n"
                         f"*Cost Impact:* ${finding.est_monthly_cost_usd}/mo"
                     ),
                 },
@@ -112,7 +116,12 @@ class SlackAdapter(Notifier):
             )
 
         response = WebhookClient(webhook_url).send(
-            text=f"FinOps Alert: {finding.rule} on {resource.resource_id}",
+            # Notification preview text — the region belongs here too, since
+            # this is all a phone lock screen shows.
+            text=(
+                f"FinOps Alert: {finding.rule} on {resource.resource_id} "
+                f"in {resource.region}"
+            ),
             blocks=blocks,
         )
         if response.status_code != 200:

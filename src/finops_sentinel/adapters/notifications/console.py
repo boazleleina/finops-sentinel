@@ -26,9 +26,10 @@ class ConsoleNotifier(Notifier):
         else:
             next_step = "Advisory only — not remediable, review manually"
         logger.info(
-            "FinOps alert: %s on %s (~$%s/mo). %s%s",
+            "FinOps alert: %s on %s in %s (~$%s/mo). %s%s",
             finding.rule,
             resource.resource_id,
+            resource.region,
             finding.est_monthly_cost_usd,
             next_step,
             f"\n  {finding.llm_summary}" if finding.llm_summary else "",

@@ -1,4 +1,5 @@
 import json
+from collections.abc import Collection
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -237,15 +238,18 @@ class SqlAlchemyRepository(FindingsRepository):
         finally:
             db.close()
 
-    def mark_unseen_resources_deleted(self, cutoff_time: datetime) -> None:
+    def mark_unseen_resources_deleted(
+        self, cutoff_time: datetime, regions: Collection[str] | None = None
+    ) -> None:
         db = self.SessionLocal()
         try:
-            stmt = (
-                update(ResourceModel)
-                .where(ResourceModel.last_seen_at < cutoff_time)
-                .values(lifecycle=ResourceLifecycle.DELETED)
-            )
-            db.execute(stmt)
+            stmt = update(ResourceModel).where(ResourceModel.last_seen_at < cutoff_time)
+            if regions is not None:
+                # Scoped sweep: resources in regions this scan never reached
+                # keep their lifecycle, so a failed region does not disarm
+                # every finding it owns.
+                stmt = stmt.where(ResourceModel.region.in_(list(regions)))
+            db.execute(stmt.values(lifecycle=ResourceLifecycle.DELETED))
             db.commit()
         finally:
             db.close()

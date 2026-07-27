@@ -5,8 +5,11 @@ All status changes go through the repository's atomic compare-and-swap
 consulting TRANSITIONS, the repository executes it atomically. Every
 meaningful event is appended to the audit log.
 """
+import logging
+from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 
 from finops_sentinel.domain import rules
 from finops_sentinel.domain.models import (
@@ -15,6 +18,7 @@ from finops_sentinel.domain.models import (
     Decision,
     Finding,
     FindingStatus,
+    Resource,
     ResourceLifecycle,
 )
 from finops_sentinel.domain.summaries import render_template_summary
@@ -23,6 +27,8 @@ from finops_sentinel.ports.cloud import CloudGateway
 from finops_sentinel.ports.notifier import Notifier
 from finops_sentinel.ports.repository import FindingsRepository
 from finops_sentinel.ports.scanner import Scanner
+
+logger = logging.getLogger(__name__)
 
 EXPIRY_HOURS = 72
 
@@ -40,47 +46,133 @@ def _audit(
     )
 
 
-def run_scan(
-    gateway: CloudGateway,
-    repo: FindingsRepository,
-    scanners: list[Scanner],
-) -> list[Finding]:
+class ScanTarget(NamedTuple):
+    """One region's worth of scanning: its gateway and its own scanners.
+
+    Scanners are per-target, not shared: each stamps its region onto every
+    Resource it discovers, and IdleEC2Scanner caches metric series on itself,
+    so one instance cannot serve two regions.
     """
-    Orchestrates the Two-Pass Scan:
+
+    region: str
+    gateway: CloudGateway
+    scanners: Sequence[Scanner]
+
+
+class ScanResult(NamedTuple):
+    """Findings plus which regions actually produced them.
+
+    regions_failed is part of the result rather than a log line because a
+    partial scan looks exactly like a clean account from the findings alone.
+    """
+
+    findings: list[Finding]
+    regions_scanned: list[str]
+    regions_failed: dict[str, str]
+
+
+def _discover_target(target: ScanTarget) -> list[tuple[Resource, dict[str, Any]]]:
+    """Pass 1 for a single region. Runs on a worker thread — no repo access."""
+    discovered: list[tuple[Resource, dict[str, Any]]] = []
+    for scanner in target.scanners:
+        discovered.extend(scanner.discover(target.gateway))
+    return discovered
+
+
+def run_scan(
+    targets: Sequence[ScanTarget],
+    repo: FindingsRepository,
+    max_workers: int = 1,
+) -> ScanResult:
+    """
+    Orchestrates the Two-Pass Scan across every target region:
     Pass 1: Discover inventory (Resources) and upsert to repository. Unseen resources marked DELETED.
     Pass 2: Evaluate the active inventory to generate findings and upsert to repository.
 
     save_finding never touches status, so re-detected findings keep whatever
     state their lifecycle reached (DENIED stays DENIED, REMEDIATED stays
     REMEDIATED).
+
+    Region isolation matters in three places:
+
+    - A region that raises is recorded and skipped, not fatal. One region with
+      a missing IAM grant or an outage must not blind the other fifteen.
+    - The DELETED sweep is scoped to the regions that succeeded. Sweeping
+      globally would declare a failed region's entire inventory gone, and
+      DELETED resources are refused by approve_finding.
+    - evaluate() sees only its own region's inventory. Cross-region pooling
+      would let a volume in one region vouch for a snapshot in another, and
+      hand region-A resources to region-B scanners.
+
+    Discovery is threaded (repository writes stay on this thread, so the
+    repository needs no thread-safety guarantees). Raises RuntimeError when
+    every region failed — returning "no findings" there reads as a clean
+    account, which is the most expensive lie this tool could tell.
     """
     scan_start_time = datetime.now(UTC)
 
-    discovered_resources: list[tuple[Any, dict[str, Any]]] = []
-    for scanner in scanners:
-        scanner_resources = scanner.discover(gateway)
-        discovered_resources.extend(scanner_resources)
+    inventory_by_region: dict[str, list[tuple[Resource, dict[str, Any]]]] = {}
+    failed_regions: dict[str, str] = {}
 
-        for resource, _ in scanner_resources:
+    workers = max(1, min(max_workers, len(targets)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_discover_target, target): target for target in targets}
+        for future in as_completed(futures):
+            region = futures[future].region
+            try:
+                inventory_by_region[region] = future.result()
+            except Exception as exc:  # noqa: BLE001 — one bad region must not end the scan
+                failed_regions[region] = f"{type(exc).__name__}: {exc}"
+                logger.warning("Scan of region %s failed: %s", region, exc)
+
+    for region, error in failed_regions.items():
+        _audit(repo, "region_scan_failed", None, {"region": region, "error": error})
+
+    if targets and not inventory_by_region:
+        raise RuntimeError(
+            "Every region failed to scan: "
+            + "; ".join(f"{region}: {error}" for region, error in failed_regions.items())
+        )
+
+    # Upsert before Pass 2: upsert_resource rewrites resource.id to the stored
+    # id for already-known resources, and findings reference that id.
+    discovered_count = 0
+    for target in targets:
+        for resource, _ in inventory_by_region.get(target.region, []):
             repo.upsert_resource(resource)
+            discovered_count += 1
 
-    repo.mark_unseen_resources_deleted(scan_start_time)
+    scanned_regions = sorted(inventory_by_region)
+    repo.mark_unseen_resources_deleted(scan_start_time, regions=scanned_regions)
 
     all_findings: list[Finding] = []
-    for scanner in scanners:
-        findings = scanner.evaluate(discovered_resources)
-        all_findings.extend(findings)
+    for target in targets:
+        inventory = inventory_by_region.get(target.region)
+        if inventory is None:
+            continue
+        for scanner in target.scanners:
+            findings = scanner.evaluate(inventory)
+            all_findings.extend(findings)
 
-        for finding in findings:
-            repo.save_finding(finding)
+            for finding in findings:
+                repo.save_finding(finding)
 
     _audit(
         repo,
         "scan_completed",
         None,
-        {"resources_discovered": len(discovered_resources), "findings": len(all_findings)},
+        {
+            "regions_scanned": scanned_regions,
+            "regions_failed": sorted(failed_regions),
+            "resources_discovered": discovered_count,
+            "findings": len(all_findings),
+        },
     )
-    return all_findings
+    return ScanResult(
+        findings=all_findings,
+        regions_scanned=scanned_regions,
+        regions_failed=failed_regions,
+    )
 
 
 def notify_open_findings(
@@ -148,13 +240,18 @@ def notify_open_findings(
 def approve_finding(
     finding_id: str,
     repo: FindingsRepository,
-    gateway: CloudGateway,
+    gateway_for_region: Callable[[str], CloudGateway],
     actor: str,
     channel: str,
     dry_run: bool,
 ) -> bool:
     """
     Approve a finding and execute its allowlisted remediation playbook.
+
+    The gateway is resolved from the resource's own region, not from a single
+    configured one: an EC2 API call for a eu-west-1 volume sent to the
+    us-east-1 endpoint fails with InvalidVolume.NotFound, which would read as
+    "already deleted" rather than "wrong region".
 
     Guardrails re-checked here, framework-free:
     - protected findings (or resources protected since detection) are refused;
@@ -236,6 +333,10 @@ def approve_finding(
 
     started_at = datetime.now(UTC)
     try:
+        # Inside the try so a bad region (or missing credentials for it) is
+        # recorded as a failed remediation rather than stranding the finding
+        # in APPROVED with no trace of why.
+        gateway = gateway_for_region(resource.region)
         result = gateway.execute(playbook, resource.resource_id, dry_run)
     except Exception as exc:
         repo.record_remediation(

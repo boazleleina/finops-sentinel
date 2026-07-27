@@ -32,11 +32,11 @@ def api_repo(tmp_path):
     repo.engine.dispose()
 
 
-def seed_notified_finding(repo, finding_id="f-123"):
+def seed_notified_finding(repo, finding_id="f-123", region="us-east-1"):
     now = datetime.now(UTC)
     repo.upsert_resource(Resource(
         id="res-1", resource_id="vol-123", resource_type=ResourceType.EBS_VOLUME,
-        resource_arn="arn", region="us-east-1", current_tags={},
+        resource_arn="arn", region=region, current_tags={},
         lifecycle=ResourceLifecycle.ACTIVE, first_seen_at=now, last_seen_at=now
     ))
     repo.save_finding(Finding(
@@ -127,6 +127,28 @@ def test_slack_callback_approve_dry_run(api_repo, monkeypatch):
     assert api_repo.get_finding_by_id("f-123").status == FindingStatus.APPROVED
     assert confirmations and "DRY RUN" in confirmations[0]
     assert "@boaz" in confirmations[0]
+
+
+def test_slack_decision_reply_names_the_region(api_repo, monkeypatch):
+    """"Approved" alone does not tell a multi-region approver which corner of
+    the account just changed."""
+    seed_notified_finding(api_repo, region="eu-west-1")
+    settings.slack_webhook_url = "https://hooks.slack.com/services/T000/B000/XXX"
+    settings.dry_run = True
+
+    confirmations = []
+    monkeypatch.setattr(
+        "finops_sentinel.adapters.notifications.slack.SlackAdapter.confirm_decision",
+        lambda self, ctx, text: confirmations.append(text),
+    )
+
+    response = client.post(
+        "/callbacks/slack",
+        data={"payload": json.dumps(slack_payload("approve_f-123"))},
+    )
+
+    assert response.status_code == 200
+    assert "eu-west-1" in confirmations[0]
 
 
 def test_slack_callback_playbook_failure_replies_cleanly(api_repo, monkeypatch):

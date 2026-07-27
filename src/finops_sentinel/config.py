@@ -1,13 +1,27 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# AWS_REGIONS sentinel: scan every region the account has enabled, discovered
+# at runtime via ec2:DescribeRegions rather than hardcoded.
+ALL_REGIONS = "all"
+
 
 class Settings(BaseSettings):
     dry_run: bool = True
     aws_endpoint_url: str | None = "http://localhost:4566"
+    # The home region: used for region discovery, for anything that needs a
+    # single endpoint, and as the fallback when AWS_REGIONS is unset.
     aws_region: str = "us-east-1"
+    # Regions to scan. Comma-separated ("us-east-1,eu-west-1,ap-southeast-2"),
+    # or "all" to scan every enabled region. Left empty, only AWS_REGION is
+    # scanned — so a single-region setup needs no new config.
+    aws_regions: str = ""
+    # Regions are scanned concurrently. Wall clock is dominated by per-instance
+    # CloudWatch calls, so a serial sweep of a dozen regions takes minutes.
+    # Set to 1 to disable the pool.
+    scan_max_workers: int = 8
     aws_access_key_id: str | None = "test"
     aws_secret_access_key: str | None = "test"
-    
+
     # Slack Settings
     slack_webhook_url: str | None = None
     slack_signing_secret: str | None = None
@@ -53,5 +67,21 @@ class Settings(BaseSettings):
     ec2_idle_min_datapoints: int = 24
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+
+    @property
+    def configured_regions(self) -> list[str]:
+        """Regions named by AWS_REGIONS, deduplicated, order preserved.
+
+        Falls back to [AWS_REGION] when unset. May contain the literal "all";
+        resolving that needs an AWS call, so it happens in bootstrap, not here.
+        """
+        ordered = dict.fromkeys(
+            region.strip() for region in self.aws_regions.split(",") if region.strip()
+        )
+        return list(ordered) or [self.aws_region]
+
+    @property
+    def scans_all_regions(self) -> bool:
+        return ALL_REGIONS in {region.lower() for region in self.configured_regions}
 
 settings = Settings()

@@ -2,11 +2,12 @@
 
 The ONLY file that knows which concrete adapters exist.
 """
+import logging
 from collections.abc import Callable
 
 from finops_sentinel.adapters.advisor.ollama import OllamaAdvisor
 from finops_sentinel.adapters.advisor.template import TemplateAdvisor
-from finops_sentinel.adapters.aws.gateway import Boto3Gateway
+from finops_sentinel.adapters.aws.gateway import Boto3Gateway, list_enabled_regions
 from finops_sentinel.adapters.aws.pricing import StaticPricing
 from finops_sentinel.adapters.aws.scanners.ebs import UnattachedEBSScanner
 from finops_sentinel.adapters.aws.scanners.ebs_snapshots import OldEbsSnapshotScanner
@@ -17,6 +18,7 @@ from finops_sentinel.adapters.notifications.console import ConsoleNotifier
 from finops_sentinel.adapters.notifications.slack import SlackAdapter
 from finops_sentinel.adapters.persistence.sqlalchemy_repo import SqlAlchemyRepository
 from finops_sentinel.config import settings
+from finops_sentinel.domain.services import ScanTarget
 from finops_sentinel.ports.advisor import Advisor
 from finops_sentinel.ports.cloud import CloudGateway
 from finops_sentinel.ports.notifier import Notifier
@@ -24,10 +26,49 @@ from finops_sentinel.ports.pricing import Pricing
 from finops_sentinel.ports.repository import FindingsRepository
 from finops_sentinel.ports.scanner import Scanner
 
+logger = logging.getLogger(__name__)
 
-def get_cloud_gateway() -> CloudGateway:
+
+def get_regions() -> list[str]:
+    """The regions a scan will cover.
+
+    AWS_REGIONS=all is resolved live against the account, so a newly enabled
+    region is picked up without a config change. If that lookup fails (no
+    ec2:DescribeRegions grant, endpoint that does not implement it) the scan
+    still runs, but only over the home region — so the failure is logged at
+    ERROR rather than swallowed: a silent narrowing to one region would look
+    exactly like an account with nothing to find.
+    """
+    if not settings.scans_all_regions:
+        return settings.configured_regions
+
+    try:
+        regions = list_enabled_regions(
+            region=settings.aws_region,
+            endpoint_url=settings.aws_endpoint_url,
+            aws_access_key_id=settings.aws_access_key_id,
+            aws_secret_access_key=settings.aws_secret_access_key,
+        )
+    except Exception as exc:  # noqa: BLE001 — any discovery failure degrades the same way
+        logger.error(
+            "AWS_REGIONS=all but region discovery failed (%s); scanning only %s. "
+            "Grant ec2:DescribeRegions, or list regions explicitly in AWS_REGIONS.",
+            exc,
+            settings.aws_region,
+        )
+        return [settings.aws_region]
+
+    return regions or [settings.aws_region]
+
+
+def get_cloud_gateway(region: str | None = None) -> CloudGateway:
+    """A gateway bound to one region; defaults to the home region.
+
+    Doubles as the region resolver handed to services.approve_finding, which
+    remediates each finding through its own region's endpoint.
+    """
     return Boto3Gateway(
-        region=settings.aws_region,
+        region=region or settings.aws_region,
         endpoint_url=settings.aws_endpoint_url,
         aws_access_key_id=settings.aws_access_key_id,
         aws_secret_access_key=settings.aws_secret_access_key,
@@ -92,27 +133,50 @@ def get_pricing() -> Pricing:
     return StaticPricing()
 
 
-def get_scanners() -> list[Scanner]:
+def get_scanners(region: str | None = None) -> list[Scanner]:
+    """A fresh scanner set for one region.
+
+    Never share these between regions: each stamps its region onto every
+    Resource it discovers, and IdleEC2Scanner caches metric series on itself
+    between discover() and evaluate().
+    """
+    region = region or settings.aws_region
     pricing = get_pricing()
     return [
-        UnattachedEBSScanner(region=settings.aws_region, pricing=pricing),
-        OrphanedEIPScanner(region=settings.aws_region, pricing=pricing),
+        UnattachedEBSScanner(region=region, pricing=pricing),
+        OrphanedEIPScanner(region=region, pricing=pricing),
         StoppedEC2Scanner(
-            region=settings.aws_region,
+            region=region,
             pricing=pricing,
             threshold_days=settings.stopped_ec2_threshold_days,
         ),
         OldEbsSnapshotScanner(
-            region=settings.aws_region,
+            region=region,
             pricing=pricing,
             age_threshold_days=settings.snapshot_age_threshold_days,
         ),
         IdleEC2Scanner(
-            region=settings.aws_region,
+            region=region,
             pricing=pricing,
             observation_days=settings.ec2_idle_observation_days,
             cpu_threshold_percent=settings.ec2_idle_cpu_percent,
             network_threshold_bytes=settings.ec2_idle_network_bytes,
             min_datapoints=settings.ec2_idle_min_datapoints,
         ),
+    ]
+
+
+def get_scan_targets() -> list[ScanTarget]:
+    """One gateway + scanner set per configured region.
+
+    Built eagerly on the calling thread: boto3 client construction is not
+    thread-safe, and run_scan discovers regions in parallel.
+    """
+    return [
+        ScanTarget(
+            region=region,
+            gateway=get_cloud_gateway(region),
+            scanners=get_scanners(region),
+        )
+        for region in get_regions()
     ]

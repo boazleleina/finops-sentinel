@@ -74,6 +74,41 @@ def block_types(blocks):
     return [block["type"] for block in blocks]
 
 
+def send_and_capture_kwargs(finding, resource):
+    """Like send_and_capture, but returns every kwarg the webhook received."""
+    settings.slack_webhook_url = "https://hooks.slack.test/T/B/X"
+    try:
+        with patch(
+            "finops_sentinel.adapters.notifications.slack.WebhookClient"
+        ) as client_cls:
+            client_cls.return_value.send.return_value = MagicMock(status_code=200, body="ok")
+            SlackAdapter().send_finding_alert(finding, resource)
+            return client_cls.return_value.send.call_args.kwargs
+    finally:
+        settings.slack_webhook_url = None
+
+
+def test_alert_names_the_region(resource):
+    """With several regions scanned, the same finding shape recurs in each —
+    without the region an approver cannot tell them apart."""
+    resource.region = "ap-southeast-2"
+
+    kwargs = send_and_capture_kwargs(make_finding("ec2_stopped"), resource)
+
+    assert "ap-southeast-2" in kwargs["blocks"][0]["text"]["text"]
+    # Also in the fallback text: that is all a lock-screen notification shows.
+    assert "ap-southeast-2" in kwargs["text"]
+
+
+def test_console_alert_names_the_region(resource, caplog):
+    resource.region = "eu-west-1"
+
+    with caplog.at_level(logging.INFO):
+        ConsoleNotifier().send_finding_alert(make_finding("ec2_stopped"), resource)
+
+    assert "eu-west-1" in caplog.text
+
+
 def test_remediable_finding_gets_approve_and_deny_buttons(resource):
     blocks = send_and_capture(make_finding("ec2_stopped"), resource)
 

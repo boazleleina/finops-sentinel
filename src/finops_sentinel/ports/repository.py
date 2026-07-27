@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections.abc import Collection
 from datetime import datetime
 from typing import Any
 
@@ -24,7 +25,17 @@ class FindingsRepository(ABC):
         ...
 
     @abstractmethod
-    def mark_unseen_resources_deleted(self, cutoff_time: datetime) -> None:
+    def mark_unseen_resources_deleted(
+        self, cutoff_time: datetime, regions: Collection[str] | None = None
+    ) -> None:
+        """
+        Mark every resource not seen since cutoff_time as DELETED.
+
+        `regions` scopes the sweep to the regions a scan actually reached.
+        A region that failed mid-scan must keep its inventory ACTIVE: DELETED
+        blocks remediation, so a transient API error would otherwise disarm
+        every finding in that region. None sweeps all regions.
+        """
         ...
 
     @abstractmethod
