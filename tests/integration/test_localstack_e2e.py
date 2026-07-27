@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from finops_sentinel.adapters.inbound import fastapi_app
 from finops_sentinel.adapters.persistence.sqlalchemy_repo import Base, SqlAlchemyRepository
-from finops_sentinel.bootstrap import get_cloud_gateway, get_notifier, get_scanners
+from finops_sentinel.bootstrap import get_notifier, get_scan_targets
 from finops_sentinel.config import settings
 from finops_sentinel.domain.models import FindingStatus
 from finops_sentinel.domain.services import notify_open_findings, run_scan
@@ -35,6 +35,7 @@ pytestmark = pytest.mark.skipif(
 def localstack_env(tmp_path):
     """Point settings at LocalStack + a fresh temp DB, live (non-dry-run) mode."""
     settings.aws_endpoint_url = LOCALSTACK_URL
+    settings.aws_regions = "us-east-1"     # pin: a developer .env may list more
     settings.aws_access_key_id = "test"
     settings.aws_secret_access_key = "test"
     settings.sentinel_db_path = str(tmp_path / "integration.db")
@@ -64,7 +65,7 @@ def test_full_loop_scan_approve_deleted_audited(localstack_env):
     ]
     try:
         # Scan through the real gateway + scanners, notify via console notifier
-        findings = run_scan(get_cloud_gateway(), repo, get_scanners())
+        findings = run_scan(get_scan_targets(), repo).findings
         assert any(f.id == f"ebs_unattached|{volume_id}" for f in findings)
         notify_open_findings(repo, get_notifier())
         finding_id = f"ebs_unattached|{volume_id}"

@@ -1,4 +1,6 @@
 import json
+from datetime import UTC, datetime
+from decimal import Decimal
 from unittest.mock import patch
 
 import httpx
@@ -8,18 +10,28 @@ from typer.testing import CliRunner
 from finops_sentinel.adapters.advisor.ollama import OllamaAdvisor
 from finops_sentinel.adapters.advisor.template import TemplateAdvisor
 from finops_sentinel.adapters.inbound.cli import app
+from finops_sentinel.domain.models import (
+    Finding,
+    FindingStatus,
+    Resource,
+    ResourceLifecycle,
+    ResourceType,
+)
+from finops_sentinel.domain.services import ScanResult, ScanTarget
 
 runner = CliRunner()
 
 
 @patch("finops_sentinel.adapters.inbound.cli.run_scan")
 @patch("finops_sentinel.adapters.inbound.cli.get_notifier")
-@patch("finops_sentinel.adapters.inbound.cli.get_cloud_gateway")
 @patch("finops_sentinel.adapters.inbound.cli.get_repository")
-@patch("finops_sentinel.adapters.inbound.cli.get_scanners")
-def test_scan_command(mock_scanners, mock_repo, mock_gateway, mock_notifier, mock_run_scan):
+@patch("finops_sentinel.adapters.inbound.cli.get_scan_targets")
+def test_scan_command(mock_targets, mock_repo, mock_notifier, mock_run_scan):
     # Simulate a scan that found nothing
-    mock_run_scan.return_value = []
+    mock_targets.return_value = [ScanTarget("us-east-1", object(), [])]
+    mock_run_scan.return_value = ScanResult(
+        findings=[], regions_scanned=["us-east-1"], regions_failed={}
+    )
     mock_repo.return_value.get_all_resources.return_value = []
 
     result = runner.invoke(app, ["scan"])
@@ -27,6 +39,118 @@ def test_scan_command(mock_scanners, mock_repo, mock_gateway, mock_notifier, moc
     assert result.exit_code == 0
     assert "Starting FinOps Sentinel Scan" in result.stdout
     assert "Scan completed in" in result.stdout
+    assert "perfectly clean" in result.stdout
+
+
+@patch("finops_sentinel.adapters.inbound.cli.run_scan")
+@patch("finops_sentinel.adapters.inbound.cli.get_notifier")
+@patch("finops_sentinel.adapters.inbound.cli.get_repository")
+@patch("finops_sentinel.adapters.inbound.cli.get_scan_targets")
+def test_scan_reports_failed_regions_instead_of_a_clean_bill(
+    mock_targets, mock_repo, mock_notifier, mock_run_scan
+):
+    """A partial scan must never print "perfectly clean" — that is the one
+    output an operator would act on by doing nothing."""
+    mock_targets.return_value = [
+        ScanTarget("us-east-1", object(), []),
+        ScanTarget("eu-west-1", object(), []),
+    ]
+    mock_run_scan.return_value = ScanResult(
+        findings=[],
+        regions_scanned=["us-east-1"],
+        regions_failed={"eu-west-1": "ClientError: AuthFailure"},
+    )
+    mock_repo.return_value.get_all_resources.return_value = []
+
+    result = runner.invoke(app, ["scan"])
+
+    assert result.exit_code == 0
+    assert "eu-west-1" in result.stdout
+    assert "AuthFailure" in result.stdout
+    assert "perfectly clean" not in result.stdout
+
+
+@patch("finops_sentinel.adapters.inbound.cli.notify_open_findings")
+@patch("finops_sentinel.adapters.inbound.cli.get_advisor")
+@patch("finops_sentinel.adapters.inbound.cli.run_scan")
+@patch("finops_sentinel.adapters.inbound.cli.get_notifier")
+@patch("finops_sentinel.adapters.inbound.cli.get_repository")
+@patch("finops_sentinel.adapters.inbound.cli.get_scan_targets")
+def test_scan_output_attributes_findings_and_savings_to_their_region(
+    mock_targets, mock_repo, mock_notifier, mock_run_scan, mock_advisor, mock_notify
+):
+    """Which region the money is in is the first question a multi-region
+    operator asks."""
+    now = datetime.now(UTC)
+
+    def resource(res_id, resource_id, region):
+        return Resource(
+            id=res_id,
+            resource_id=resource_id,
+            resource_type=ResourceType.EBS_VOLUME,
+            resource_arn=f"arn:aws:ec2:{region}:account:volume/{resource_id}",
+            region=region,
+            current_tags={},
+            lifecycle=ResourceLifecycle.ACTIVE,
+            first_seen_at=now,
+            last_seen_at=now,
+        )
+
+    def finding(finding_id, res_id, cost):
+        return Finding(
+            id=finding_id,
+            resource_ref=res_id,
+            rule="ebs_unattached",
+            evidence={},
+            tags_at_detection={},
+            est_monthly_cost_usd=Decimal(cost),
+            status=FindingStatus.OPEN,
+            protected=False,
+            detected_at=now,
+            last_seen_at=now,
+        )
+
+    findings = [
+        finding("f-east", "res-east", "8.00"),
+        finding("f-west", "res-west", "42.00"),
+    ]
+    mock_targets.return_value = [
+        ScanTarget("us-east-1", object(), []),
+        ScanTarget("eu-west-1", object(), []),
+    ]
+    mock_run_scan.return_value = ScanResult(
+        findings=findings,
+        regions_scanned=["eu-west-1", "us-east-1"],
+        regions_failed={},
+    )
+    mock_repo.return_value.get_all_resources.return_value = [
+        resource("res-east", "vol-east", "us-east-1"),
+        resource("res-west", "vol-west", "eu-west-1"),
+    ]
+    mock_repo.return_value.get_finding_by_id.side_effect = lambda fid: next(
+        f for f in findings if f.id == fid
+    )
+    mock_notify.return_value = findings
+
+    result = runner.invoke(app, ["scan"])
+
+    assert result.exit_code == 0
+    assert "Savings by Region" in result.stdout
+    assert "eu-west-1" in result.stdout
+    assert "$42.00" in result.stdout
+    assert "$50.00" in result.stdout  # total across both regions
+
+
+@patch("finops_sentinel.adapters.inbound.cli.get_regions")
+def test_regions_command_lists_what_will_be_scanned(mock_regions):
+    mock_regions.return_value = ["us-east-1", "eu-west-1", "ap-southeast-2"]
+
+    result = runner.invoke(app, ["regions"])
+
+    assert result.exit_code == 0
+    assert "3 region(s)" in result.stdout
+    for region in mock_regions.return_value:
+        assert region in result.stdout
 
 
 @patch("finops_sentinel.adapters.inbound.cli.get_advisor")

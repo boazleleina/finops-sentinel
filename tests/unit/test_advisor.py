@@ -121,6 +121,30 @@ def test_prompt_omits_unlisted_evidence_keys(finding, resource):
 
 
 @respx.mock
+def test_prompt_carries_the_region_and_asks_for_it_back(finding, resource):
+    """Scanning many regions makes the same finding shape recur in each; the
+    operator needs to know which one they are looking at."""
+    resource.region = "ap-southeast-2"
+    route = respx.post(CHAT_URL).mock(
+        return_value=httpx.Response(200, json=_ok_body(_valid_content()))
+    )
+
+    advisor().summarize(finding, resource)
+
+    sent = json.loads(route.calls[0].request.content)
+    assert "ap-southeast-2" in sent["messages"][1]["content"]
+    assert "region" in sent["messages"][0]["content"].lower()
+
+
+def test_template_fallback_always_names_the_region(finding, resource):
+    """The deterministic floor must carry the region too — it is what every
+    LLM failure degrades to."""
+    resource.region = "eu-west-1"
+
+    assert "eu-west-1" in render_template_summary(finding, resource)
+
+
+@respx.mock
 def test_thinking_blocks_are_stripped(finding, resource):
     content = "<think>let me reason about this</think>" + _valid_content()
     respx.post(CHAT_URL).mock(return_value=httpx.Response(200, json=_ok_body(content)))

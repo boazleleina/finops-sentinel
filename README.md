@@ -395,7 +395,9 @@ Every setting, its default, and what it does. All are environment variables, rea
 |---|---|---|
 | `DRY_RUN` | `true` | When true, approvals log what they *would* do and change nothing |
 | `AWS_ENDPOINT_URL` | `http://localhost:4566` | LocalStack endpoint. **Unset for real AWS** |
-| `AWS_REGION` | `us-east-1` | Region scanned |
+| `AWS_REGION` | `us-east-1` | Home region: used for region discovery, and scanned alone when `AWS_REGIONS` is empty |
+| `AWS_REGIONS` | *(empty)* | Regions to scan: comma-separated, or `all`. See [Multi-Region Scanning](#multi-region-scanning) |
+| `SCAN_MAX_WORKERS` | `8` | Regions scanned in parallel. `1` scans them one at a time |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | `test` | LocalStack dummies; replace or use an IAM role for real AWS |
 | `SENTINEL_DB_PATH` | `.sentinel.db` | SQLite file holding findings. The scan and the API server **must** share this |
 
@@ -428,6 +430,42 @@ Every setting, its default, and what it does. All are environment variables, rea
 | `ADVISOR_MAX_FINDINGS_PER_SCAN` | `25` | Cap on LLM calls per notify pass, spent on the costliest findings first |
 
 Prices are deliberately **not** configurable here — see [Cost Estimates](#cost-estimates).
+
+---
+
+## Multi-Region Scanning
+
+By default only `AWS_REGION` is scanned. `AWS_REGIONS` widens that:
+
+```bash
+AWS_REGIONS=us-east-1,eu-west-1,ap-southeast-2   # explicit list
+AWS_REGIONS=all                                  # every region the account has enabled
+```
+
+`all` is resolved live via `ec2:DescribeRegions`, so a newly enabled region is picked up without a config change. Regions the account never opted into are excluded — every API call against one fails with `AuthFailure`, so scanning them is pure noise. Confirm what a run will cover before paying for it:
+
+```bash
+sentinel regions
+```
+
+Each region gets its own gateway and its own scanner instances, and they are scanned in parallel (`SCAN_MAX_WORKERS`), because wall clock is dominated by the per-instance CloudWatch calls the idle rule makes.
+
+### What region isolation buys you
+
+Four failure modes drove the design, and each is pinned by a test in `tests/unit/test_multi_region.py`:
+
+*   **One bad region does not end the scan.** A region with a missing IAM grant, an outage, or a throttle is recorded and skipped; the others still report. The failures are printed in red, written to the audit log as `region_scan_failed`, and returned on `ScanResult.regions_failed`.
+*   **A failed region keeps its inventory.** The stale-resource sweep is scoped to the regions that actually succeeded. A global sweep would mark every resource in the failed region `DELETED`, and `DELETED` resources are refused by `approve_finding` — a transient API error would silently disarm every finding in that region.
+*   **Evaluation never pools across regions.** Each scanner sees only its own region's inventory. Otherwise a volume in one region could vouch for a snapshot in another (the orphan check), and region-A resources would be handed to region-B scanners.
+*   **A total failure raises instead of reporting zero findings.** "No findings" and "could not reach AWS" look identical from the outside, and the first one gets acted on by doing nothing.
+
+Remediation follows the finding: `approve_finding` resolves the gateway from the resource's own region, not from `AWS_REGION`. An `eu-west-1` volume deleted through the `us-east-1` endpoint fails with `InvalidVolume.NotFound`, which reads as *already gone* rather than *wrong region*.
+
+### Caveats
+
+*   **Savings estimates stay us-east-1 list prices** in every region, so multi-region totals are conservative. The static pricing adapter logs a warning once per off-region — see [Cost Estimates](#cost-estimates).
+*   **IAM:** the scan needs its usual read grants **in every scanned region**, plus `ec2:DescribeRegions` when using `AWS_REGIONS=all`. Region-scoped IAM conditions are the most common cause of a partially failed scan.
+*   **Dropping a region from `AWS_REGIONS` does not delete its inventory.** Resources there stay `ACTIVE` at their last-seen state, since an unscanned region cannot be observed. Scan it once more to retire them.
 
 ### Swapping the model or the backend
 
@@ -478,7 +516,8 @@ To move to real numbers, add a second adapter implementing the same port — aga
 
 | Command | Description |
 |---|---|
-| `sentinel scan` | Two-pass scan: inventory upsert, rule evaluation, then notify new findings |
+| `sentinel scan` | Two-pass scan across every configured region: inventory upsert, rule evaluation, then notify new findings |
+| `sentinel regions` | List the regions the current configuration will scan, without running one |
 | `sentinel serve` | Start the FastAPI server (`--host`, `--port`) |
 | `sentinel expire` | Expire NOTIFIED findings older than 72 hours |
 | `sentinel smoke-llm` | Gate-check the local Ollama advisor (`--iterations`); reports schema-adherence and latency, exits non-zero on any failure |

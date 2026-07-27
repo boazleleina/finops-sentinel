@@ -11,6 +11,7 @@ from finops_sentinel.domain.models import (
     ResourceType,
 )
 from finops_sentinel.domain.services import (
+    ScanTarget,
     approve_finding,
     deny_finding,
     expire_stale,
@@ -77,6 +78,11 @@ class FakeCloudGateway(CloudGateway):
         return {"snapshot_id": f"snap-{resource_id}"} if not dry_run else {"dry_run": True}
 
 
+def resolver(gateway):
+    """approve_finding takes a region -> gateway resolver, not a gateway."""
+    return lambda _region: gateway
+
+
 class FakeNotifier(Notifier):
     """Appends alerts to a list. Zero Slack, zero HTTP."""
 
@@ -107,9 +113,12 @@ def seed(repository, *, finding_status=FindingStatus.NOTIFIED, tags=None, protec
 
 
 def test_run_scan_orchestrator(repository):
-    findings = run_scan(None, repository, [MockScanner()])
+    result = run_scan([ScanTarget("us-east-1", None, [MockScanner()])], repository)
+    findings = result.findings
 
     assert len(findings) == 1
+    assert result.regions_scanned == ["us-east-1"]
+    assert result.regions_failed == {}
     assert repository.get_all_resources()[0].resource_id == "vol-123"
     assert repository.get_findings()[0].id == "f-mock"
     # Scan itself is audited
@@ -144,7 +153,7 @@ def test_approve_finding_live(repository):
     seed(repository)
     gateway = FakeCloudGateway()
 
-    assert approve_finding("f-mock", repository, gateway,
+    assert approve_finding("f-mock", repository, resolver(gateway),
                            actor="boaz", channel="slack", dry_run=False) is True
 
     assert gateway.executed == [("snapshot_then_delete_volume", "vol-123", False)]
@@ -157,7 +166,7 @@ def test_approve_finding_dry_run(repository):
     seed(repository)
     gateway = FakeCloudGateway()
 
-    assert approve_finding("f-mock", repository, gateway,
+    assert approve_finding("f-mock", repository, resolver(gateway),
                            actor="boaz", channel="slack", dry_run=True) is True
 
     # Dry run: playbook invoked with dry_run flag, finding NOT marked remediated
@@ -172,7 +181,7 @@ def test_approve_blocked_when_protected_flag(repository):
     seed(repository, protected=True)
     gateway = FakeCloudGateway()
 
-    assert approve_finding("f-mock", repository, gateway,
+    assert approve_finding("f-mock", repository, resolver(gateway),
                            actor="boaz", channel="slack", dry_run=False) is False
     assert gateway.executed == []
     assert repository.get_finding_by_id("f-mock").status == FindingStatus.NOTIFIED
@@ -185,7 +194,7 @@ def test_approve_blocked_when_resource_tagged_protected_after_detection(reposito
     seed(repository, tags={"finops:protected": "true"}, protected=False)
     gateway = FakeCloudGateway()
 
-    assert approve_finding("f-mock", repository, gateway,
+    assert approve_finding("f-mock", repository, resolver(gateway),
                            actor="boaz", channel="slack", dry_run=False) is False
     assert gateway.executed == []
 
@@ -198,7 +207,7 @@ def test_approve_blocked_when_resource_gone(repository):
     repository.save_finding(make_finding())
     gateway = FakeCloudGateway()
 
-    assert approve_finding("f-mock", repository, gateway,
+    assert approve_finding("f-mock", repository, resolver(gateway),
                            actor="boaz", channel="slack", dry_run=False) is False
     assert gateway.executed == []
     assert repository.get_finding_by_id("f-mock").status == FindingStatus.NOTIFIED
@@ -210,7 +219,7 @@ def test_approve_from_open_is_illegal(repository):
     seed(repository, finding_status=FindingStatus.OPEN)
     gateway = FakeCloudGateway()
 
-    assert approve_finding("f-mock", repository, gateway,
+    assert approve_finding("f-mock", repository, resolver(gateway),
                            actor="boaz", channel="slack", dry_run=False) is False
     assert gateway.executed == []
 
@@ -219,9 +228,9 @@ def test_double_approve_executes_once(repository):
     seed(repository)
     gateway = FakeCloudGateway()
 
-    assert approve_finding("f-mock", repository, gateway,
+    assert approve_finding("f-mock", repository, resolver(gateway),
                            actor="boaz", channel="slack", dry_run=False) is True
-    assert approve_finding("f-mock", repository, gateway,
+    assert approve_finding("f-mock", repository, resolver(gateway),
                            actor="boaz", channel="slack", dry_run=False) is False
     assert len(gateway.executed) == 1
 
@@ -231,7 +240,7 @@ def test_approve_playbook_failure_marks_failed(repository):
     gateway = FakeCloudGateway(fail=True)
 
     with pytest.raises(RuntimeError):
-        approve_finding("f-mock", repository, gateway,
+        approve_finding("f-mock", repository, resolver(gateway),
                         actor="boaz", channel="slack", dry_run=False)
 
     assert repository.get_finding_by_id("f-mock").status == FindingStatus.FAILED
@@ -278,7 +287,7 @@ def test_approve_blocked_for_notify_only_rule(repository):
     gateway = FakeCloudGateway()
 
     approved = approve_finding(
-        "f-mock", repository, gateway, actor="boaz", channel="slack", dry_run=False
+        "f-mock", repository, resolver(gateway), actor="boaz", channel="slack", dry_run=False
     )
 
     assert approved is False
@@ -296,7 +305,7 @@ def test_approve_still_works_for_state_based_ec2_rule(repository):
     gateway = FakeCloudGateway()
 
     approved = approve_finding(
-        "f-mock", repository, gateway, actor="boaz", channel="slack", dry_run=False
+        "f-mock", repository, resolver(gateway), actor="boaz", channel="slack", dry_run=False
     )
 
     assert approved is True

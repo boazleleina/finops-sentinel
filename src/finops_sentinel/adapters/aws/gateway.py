@@ -10,6 +10,36 @@ from finops_sentinel.ports.cloud import CloudGateway
 logger = logging.getLogger(__name__)
 
 
+def list_enabled_regions(
+    region: str,
+    endpoint_url: str | None = None,
+    aws_access_key_id: str | None = None,
+    aws_secret_access_key: str | None = None,
+) -> list[str]:
+    """Every region this account can actually call, newest opt-ins included.
+
+    Opt-in regions (ap-east-1, me-south-1, ...) that the account never enabled
+    are excluded: every API call against one fails with AuthFailure, which
+    would turn a full-account scan into a wall of failed regions.
+
+    Needs the ec2:DescribeRegions permission. `region` is only the endpoint the
+    question is asked through — the answer is account-wide.
+    """
+    client = boto3.client(
+        "ec2",
+        region_name=region,
+        endpoint_url=endpoint_url,
+        aws_access_key_id=aws_access_key_id,
+        aws_secret_access_key=aws_secret_access_key,
+    )
+    response = client.describe_regions(AllRegions=False)
+    return sorted(
+        entry["RegionName"]
+        for entry in response.get("Regions", [])
+        if entry.get("OptInStatus") != "not-opted-in"
+    )
+
+
 class Boto3Gateway(CloudGateway):
     """
     AWS Adapter implementing the CloudGateway port using boto3.

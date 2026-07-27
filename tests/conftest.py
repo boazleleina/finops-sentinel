@@ -28,6 +28,11 @@ def aws_credentials():
     settings.aws_access_key_id = "testing"
     settings.aws_secret_access_key = "testing"
 
+    # Single region unless a test says otherwise — a developer .env with
+    # AWS_REGIONS set must not change what the unit suite scans.
+    settings.aws_region = "us-east-1"
+    settings.aws_regions = ""
+
     # Never talk to a real Slack workspace from unit tests, and keep the
     # safe default regardless of the developer's .env.
     settings.slack_webhook_url = None

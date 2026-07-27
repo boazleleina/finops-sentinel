@@ -8,10 +8,10 @@ from rich.table import Table
 
 from finops_sentinel.bootstrap import (
     get_advisor,
-    get_cloud_gateway,
     get_notifier,
+    get_regions,
     get_repository,
-    get_scanners,
+    get_scan_targets,
 )
 from finops_sentinel.config import settings
 from finops_sentinel.domain.models import (
@@ -35,32 +35,54 @@ def scan() -> None:
     """
     console.print("[bold green]Starting FinOps Sentinel Scan...[/bold green]")
 
-    gateway = get_cloud_gateway()
     repo = get_repository()
-    scanners = get_scanners()
+    targets = get_scan_targets()
     notifier = get_notifier()
 
     # Print the database up front: findings live here, and the API/Slack
     # callback server must read this SAME path or every Approve click fails
     # with "cannot be approved" because the lookup misses.
-    console.print(f"Loaded [bold cyan]{len(scanners)}[/bold cyan] scanners.")
+    console.print(
+        f"Regions: [bold cyan]{', '.join(t.region for t in targets)}[/bold cyan] "
+        f"({len(targets)})"
+    )
+    console.print(f"Loaded [bold cyan]{len(targets[0].scanners)}[/bold cyan] scanners per region.")
     console.print(f"Findings database: [bold]{settings.sentinel_db_path}[/bold]")
 
     with console.status("[bold yellow]Scanning AWS environment and evaluating rules...[/bold yellow]"):
         start_time = datetime.now(UTC)
-        findings = run_scan(gateway, repo, scanners)
+        result = run_scan(targets, repo, max_workers=settings.scan_max_workers)
         duration = (datetime.now(UTC) - start_time).total_seconds()
 
+    findings = result.findings
     inventory = repo.get_all_resources()
 
     console.print(f"\nScan completed in [bold]{duration:.2f}s[/bold]")
     console.print(f"Inventory Discovered: [bold cyan]{len(inventory)}[/bold cyan] resources")
 
-    if not findings:
+    if result.regions_failed:
+        # Loud on purpose: without this, a partial scan is indistinguishable
+        # from a clean account.
         console.print(
-            "[bold green]No cost optimization opportunities found! "
-            "Your environment is perfectly clean.[/bold green]"
+            f"\n[bold red]{len(result.regions_failed)} region(s) failed to scan — "
+            "results below are incomplete:[/bold red]"
         )
+        for region, error in sorted(result.regions_failed.items()):
+            console.print(f"  [red]✗[/red] {region}: {error}")
+        console.print()
+
+    if not findings:
+        if result.regions_failed:
+            console.print(
+                "[bold yellow]No opportunities found in the regions that were "
+                "scanned — but the failures above mean this is not a clean "
+                "bill of health.[/bold yellow]"
+            )
+        else:
+            console.print(
+                "[bold green]No cost optimization opportunities found! "
+                "Your environment is perfectly clean.[/bold green]"
+            )
         return
 
     notified = notify_open_findings(
@@ -75,6 +97,7 @@ def scan() -> None:
 
     table = Table(title="Optimization Opportunities")
     table.add_column("Resource ID", style="cyan", no_wrap=True)
+    table.add_column("Region", style="yellow", no_wrap=True)
     table.add_column("Type", style="magenta")
     table.add_column("Rule", style="blue")
     table.add_column("Savings ($/mo)", justify="right", style="green")
@@ -82,17 +105,22 @@ def scan() -> None:
     table.add_column("Status")
 
     total_savings = 0.0
+    # Actionable (non-protected) findings only — the same basis as the total.
+    savings_by_region: dict[str, float] = {}
+    count_by_region: dict[str, int] = {}
     for f in findings:
         protected_str = "[bold green]Yes[/bold green]" if f.protected else "No"
         resource = next((r for r in inventory if r.id == f.resource_ref), None)
         res_type = str(resource.resource_type) if resource else "Unknown"
         res_id = resource.resource_id if resource else f.resource_ref
+        res_region = resource.region if resource else "?"
 
         current = repo.get_finding_by_id(f.id)
         status = current.status if current else f.status
 
         table.add_row(
             res_id,
+            res_region,
             res_type,
             f.rule,
             f"${f.est_monthly_cost_usd:.2f}",
@@ -101,11 +129,47 @@ def scan() -> None:
         )
         if not f.protected:
             total_savings += float(f.est_monthly_cost_usd)
+            savings_by_region[res_region] = (
+                savings_by_region.get(res_region, 0.0) + float(f.est_monthly_cost_usd)
+            )
+            count_by_region[res_region] = count_by_region.get(res_region, 0) + 1
 
     console.print(table)
+
+    if len(result.regions_scanned) > 1:
+        by_region = Table(title="Savings by Region")
+        by_region.add_column("Region", style="yellow", no_wrap=True)
+        by_region.add_column("Findings", justify="right")
+        by_region.add_column("Savings ($/mo)", justify="right", style="green")
+        for region, savings in sorted(
+            savings_by_region.items(), key=lambda item: item[1], reverse=True
+        ):
+            by_region.add_row(region, str(count_by_region[region]), f"${savings:.2f}")
+        console.print(by_region)
+
     console.print(
         f"\n[bold]Total Potential Monthly Savings: [green]${total_savings:.2f}[/green][/bold]"
     )
+
+
+@app.command()
+def regions() -> None:
+    """
+    List the regions the current configuration will scan.
+
+    Cheap way to confirm AWS_REGIONS before paying for a full scan — in
+    particular whether AWS_REGIONS=all actually resolved, or quietly fell back
+    to the home region because ec2:DescribeRegions was denied.
+    """
+    resolved = get_regions()
+    source = "AWS_REGIONS=all (discovered)" if settings.scans_all_regions else "AWS_REGIONS"
+    if not settings.aws_regions.strip():
+        source = "AWS_REGION (no AWS_REGIONS set)"
+
+    console.print(f"[bold]{len(resolved)}[/bold] region(s) from [dim]{source}[/dim]:")
+    for region in resolved:
+        marker = " [dim](home)[/dim]" if region == settings.aws_region else ""
+        console.print(f"  [cyan]{region}[/cyan]{marker}")
 
 
 @app.command()

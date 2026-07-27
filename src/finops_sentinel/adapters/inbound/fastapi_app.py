@@ -65,13 +65,30 @@ def _refusal_reason(finding_id: str, action: str) -> str:
     )
 
 
+def _finding_region(finding_id: str) -> str | None:
+    """The region a finding's resource lives in, for decision replies.
+
+    An approver scanning several regions needs the confirmation to say where
+    the change landed — "Approved" alone does not tell them which account
+    corner just changed.
+    """
+    repo = get_repository()
+    finding = repo.get_finding_by_id(finding_id)
+    if finding is None:
+        return None
+    resource = repo.get_resource_by_id(finding.resource_ref)
+    return resource.region if resource else None
+
+
 def _decide(finding_id: str, action: str, actor: str, channel: str) -> bool:
     repo = get_repository()
     if action == "approve":
         return approve_finding(
             finding_id,
             repo,
-            get_cloud_gateway(),
+            # The resolver, not a gateway: the service picks the endpoint for
+            # the finding's own region.
+            get_cloud_gateway,
             actor=actor,
             channel=channel,
             dry_run=settings.dry_run,
@@ -115,6 +132,11 @@ async def notifier_callback(channel: str, request: Request) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # Resolved before the decision: a successful remediation may delete the
+    # resource row's usefulness, and the reply should still name the region.
+    region = _finding_region(decision.finding_id)
+    where = f" in `{region}`" if region else ""
+
     try:
         success = _decide(
             decision.finding_id, decision.action, actor=decision.actor, channel=channel
@@ -123,7 +145,7 @@ async def notifier_callback(channel: str, request: Request) -> dict[str, Any]:
         # Playbook failed mid-remediation; the service already recorded
         # FAILED plus the audit/remediation rows. Reply cleanly instead of 500.
         outcome = (
-            f"❌ *Remediation failed* after approval by @{decision.actor} — "
+            f"❌ *Remediation failed*{where} after approval by @{decision.actor} — "
             "the resource may no longer exist. See the audit log for details."
         )
         notifier.confirm_decision(reply_context, outcome)
@@ -134,9 +156,12 @@ async def notifier_callback(channel: str, request: Request) -> dict[str, Any]:
     elif decision.action == "deny":
         outcome = f"🚫 *Denied* by @{decision.actor} — no action taken, finding closed."
     elif settings.dry_run:
-        outcome = f"✅ *Approved* by @{decision.actor} — DRY RUN, no resources were changed."
+        outcome = (
+            f"✅ *Approved* by @{decision.actor} — DRY RUN, no resources were "
+            f"changed{where}."
+        )
     else:
-        outcome = f"✅ *Approved* by @{decision.actor} — remediation executed."
+        outcome = f"✅ *Approved* by @{decision.actor} — remediation executed{where}."
 
     notifier.confirm_decision(reply_context, outcome)
     return {"message": "ok" if success else "rejected", "outcome": outcome}
