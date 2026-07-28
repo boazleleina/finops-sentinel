@@ -327,6 +327,29 @@ class ExplodingScanner(Scanner):
         return []
 
 
+def test_resources_discovered_counts_this_scan_not_the_whole_table(repository):
+    """The repository also holds every resource ever seen and since deleted.
+
+    Reporting its row count as "discovered" made a 30-resource environment
+    claim hundreds, purely from earlier scans of resources long gone.
+    """
+    run_scan([ScanTarget("us-east-1", None, [MockScanner()])], repository)
+
+    class EmptyScanner(Scanner):
+        def discover(self, gateway):
+            return []
+
+        def evaluate(self, discover_results):
+            return []
+
+    result = run_scan([ScanTarget("us-east-1", None, [EmptyScanner()])], repository)
+
+    assert result.resources_discovered == 0
+    # The row is still on file — now marked DELETED, which is exactly the
+    # difference the old count papered over.
+    assert len(repository.get_all_resources()) == 1
+
+
 def test_one_failing_scanner_does_not_blind_the_others(repository):
     """A missing IAM grant on one service must not cost every other finding.
 

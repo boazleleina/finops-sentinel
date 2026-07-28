@@ -73,6 +73,9 @@ class ScanResult(NamedTuple):
     regions_scanned: list[str]
     regions_failed: dict[str, str]
     scanners_failed: dict[str, str] = {}  # noqa: RUF012 — NamedTuple default, never mutated
+    # Resources THIS scan saw in the cloud. Not the same as the repository's
+    # row count, which also holds every resource ever seen and since deleted.
+    resources_discovered: int = 0
 
 
 class _Discovery(NamedTuple):
@@ -251,6 +254,7 @@ def run_scan(
         regions_scanned=scanned_regions,
         regions_failed=failed_regions,
         scanners_failed=scanners_failed,
+        resources_discovered=discovered_count,
     )
 
 

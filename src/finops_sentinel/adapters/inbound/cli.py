@@ -70,7 +70,12 @@ def scan() -> None:
     inventory = repo.get_all_resources()
 
     console.print(f"\nScan completed in [bold]{duration:.2f}s[/bold]")
-    console.print(f"Inventory Discovered: [bold cyan]{len(inventory)}[/bold cyan] resources")
+    # The scan's own count, not the repository's row count — the latter also
+    # holds every resource ever seen and since deleted, which made a 30-resource
+    # environment report hundreds.
+    console.print(
+        f"Inventory Discovered: [bold cyan]{result.resources_discovered}[/bold cyan] resources"
+    )
 
     if result.regions_failed:
         # Loud on purpose: without this, a partial scan is indistinguishable
@@ -130,37 +135,45 @@ def scan() -> None:
         f"(via {notifier.channel_name})\n"
     )
 
+    # Five columns, not seven. Rich shrinks columns to fit the terminal, and at
+    # a normal width the old layout squeezed Savings and Status to zero
+    # characters — losing the only numbers anyone runs this for. Resource type
+    # is dropped because the rule name already implies it (ebs_unattached is
+    # never anything but a volume), and Protected becomes a marker on the id.
     table = Table(title="Optimization Opportunities")
-    table.add_column("Resource ID", style="cyan", no_wrap=True)
-    table.add_column("Region", style="yellow", no_wrap=True)
-    table.add_column("Type", style="magenta")
-    table.add_column("Rule", style="blue")
-    table.add_column("Savings ($/mo)", justify="right", style="green")
-    table.add_column("Protected", justify="center")
-    table.add_column("Status")
+    # Truncated rather than wrapped: one line per finding keeps a 24-finding
+    # table scannable, and the tail of an AWS id is the least informative part.
+    #
+    # Cost and status get fixed widths. Rich shares width out by content length,
+    # and resource ids are by far the longest thing here, so left to itself it
+    # starves the two columns the report exists to communicate — a savings
+    # column rendered as "$0…" is worse than no column at all.
+    # Four columns fit an 80-column terminal exactly. Status is not among them:
+    # the notified count is already reported above, and 🔒 marks the findings
+    # deliberately held back — per-finding lifecycle detail belongs in
+    # GET /findings, not in a summary that has to choose what to drop.
+    table.add_column(
+        "Resource ID", style="cyan", no_wrap=True, overflow="ellipsis", max_width=26
+    )
+    table.add_column("Region", style="yellow", no_wrap=True, width=14)
+    table.add_column("Rule", style="blue", no_wrap=True, width=16)
+    table.add_column("$/mo", justify="right", style="green", no_wrap=True, width=8)
 
     total_savings = 0.0
     # Actionable (non-protected) findings only — the same basis as the total.
     savings_by_region: dict[str, float] = {}
     count_by_region: dict[str, int] = {}
+    by_id = {r.id: r for r in inventory}
     for f in findings:
-        protected_str = "[bold green]Yes[/bold green]" if f.protected else "No"
-        resource = next((r for r in inventory if r.id == f.resource_ref), None)
-        res_type = str(resource.resource_type) if resource else "Unknown"
+        resource = by_id.get(f.resource_ref)
         res_id = resource.resource_id if resource else f.resource_ref
         res_region = resource.region if resource else "?"
 
-        current = repo.get_finding_by_id(f.id)
-        status = current.status if current else f.status
-
         table.add_row(
-            res_id,
+            f"[bold green]🔒[/bold green] {res_id}" if f.protected else res_id,
             res_region,
-            res_type,
             f.rule,
-            f"${f.est_monthly_cost_usd:.2f}",
-            protected_str,
-            status.upper(),
+            f"${f.est_monthly_cost_usd:,.2f}",
         )
         if not f.protected:
             total_savings += float(f.est_monthly_cost_usd)
@@ -170,6 +183,11 @@ def scan() -> None:
             count_by_region[res_region] = count_by_region.get(res_region, 0) + 1
 
     console.print(table)
+    if any(f.protected for f in findings):
+        console.print(
+            "[dim]🔒 protected by tag — reported, never notified, never "
+            "remediated, and excluded from the totals below.[/dim]"
+        )
 
     if len(result.regions_scanned) > 1:
         by_region = Table(title="Savings by Region")
