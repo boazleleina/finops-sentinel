@@ -50,4 +50,17 @@ jobs:
         AWS_SECRET_ACCESS_KEY: test
         AWS_DEFAULT_REGION: us-east-1
       run: |
-        pytest tests/ -v --cov=src/finops_sentinel --cov-report=term-missing --cov-fail-under=80
+        pytest tests/ -v --cov=src/finops_sentinel --cov-report=term-missing --cov-fail-under=90
+
+    # The domain is the layer the whole architecture rests on: guardrails, the
+    # state machine, and the approval logic all live there, and all of it is
+    # testable with in-memory fakes. It is held to a higher bar than the
+    # adapters, which spend their statements on boto3 and HTTP calls that are
+    # only coverable by mocking the client back at itself.
+    #
+    # ports/ is deliberately NOT included. Its abstract bodies are `...` under
+    # `# pragma: no cover`, so the only statements left are imports and `def`
+    # lines, which execute on import — it reports 100% without a single test
+    # and would just pad the denominator.
+    - name: Coverage gate on the domain layer
+      run: coverage report --include='*/domain/*' --fail-under=95

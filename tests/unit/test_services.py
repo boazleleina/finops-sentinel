@@ -19,9 +19,9 @@ from finops_sentinel.domain.services import (
     run_scan,
 )
 from finops_sentinel.ports.advisor import Advisor
-from finops_sentinel.ports.cloud import CloudGateway
 from finops_sentinel.ports.notifier import Notifier
 from finops_sentinel.ports.scanner import Scanner
+from tests.conftest import FakeGatewayBase
 
 
 def make_resource(res_id="res-mock", resource_id="vol-123",
@@ -53,7 +53,7 @@ class MockScanner(Scanner):
         return [make_finding(status=FindingStatus.OPEN, resource_ref=res.id)]
 
 
-class FakeCloudGateway(CloudGateway):
+class FakeCloudGateway(FakeGatewayBase):
     """In-memory gateway: records executed playbooks, can be told to fail."""
 
     def __init__(self, fail=False):
@@ -66,8 +66,9 @@ class FakeCloudGateway(CloudGateway):
     def describe_ebs_snapshots(self): return []
     def describe_running_ec2_instances(self): return []
 
-    def get_instance_metric_averages(
-        self, instance_id, metric_name, days, period_seconds=3600
+    def get_metric_averages(
+        self, namespace, dimension_name, dimension_value, metric_name, days,
+        period_seconds=3600,
     ):
         return []
 
@@ -310,6 +311,167 @@ def test_approve_still_works_for_state_based_ec2_rule(repository):
 
     assert approved is True
     assert gateway.executed == [("terminate_stopped_instance", "vol-123", False)]
+
+
+# --------------------------------------------------------------------------
+# Guardrail and concurrency branches
+#
+# These are the refusal paths: the checks that run when the world changed
+# between detection and approval, or when two actors decide at once. They are
+# the least likely code to execute in a happy-path test and the most expensive
+# to get wrong, since every one of them stands between an operator's click and
+# an irreversible AWS call.
+# --------------------------------------------------------------------------
+
+
+def _lose_every_race(repository):
+    """Make every compare-and-swap report that someone else got there first."""
+    repository.transition_finding = lambda *args, **kwargs: False
+
+
+def test_notify_skips_finding_whose_resource_vanished(repository):
+    """A finding can outlive its resource row; notifying it would crash.
+
+    send_finding_alert needs the Resource for region, type, and tags, so a
+    dangling resource_ref has to be skipped rather than passed through as None.
+    """
+    repository.save_finding(
+        make_finding(status=FindingStatus.OPEN, resource_ref="res-does-not-exist")
+    )
+    notifier = FakeNotifier()
+
+    assert notify_open_findings(repository, notifier) == []
+    assert notifier.alerts == []
+    # Still OPEN, so a later scan that re-discovers the resource can notify it.
+    assert repository.get_finding_by_id("f-mock").status == FindingStatus.OPEN
+
+
+def test_notify_losing_the_transition_race_does_not_record_a_notification(repository):
+    """Two notifiers on the same finding: the alert may duplicate, state may not.
+
+    The CAS is what makes concurrent scans safe. The loser must not append a
+    notification row, or expire_stale would later measure staleness from a
+    notification that this process only half-sent.
+    """
+    seed(repository, finding_status=FindingStatus.OPEN)
+    _lose_every_race(repository)
+    notifier = FakeNotifier()
+
+    assert notify_open_findings(repository, notifier) == []
+    # The alert did go out — the race was lost after the send, not before.
+    assert len(notifier.alerts) == 1
+    assert repository.get_latest_notification_time("f-mock") is None
+    assert not any(
+        e.event == "finding_notified" for e in repository.get_audit_events("f-mock")
+    )
+
+
+def test_approve_unknown_finding_is_refused(repository):
+    """A stale Slack button from a wiped database must not raise."""
+    gateway = FakeCloudGateway()
+
+    approved = approve_finding(
+        "f-nope", repository, resolver(gateway), actor="boaz", channel="slack", dry_run=False
+    )
+
+    assert approved is False
+    assert gateway.executed == []
+
+
+def test_approve_refused_when_the_resource_row_is_missing(repository):
+    """Distinct from the DELETED case: here there is no row to check at all.
+
+    Without the resource there is no region to resolve a gateway for and no
+    tags to re-check protection against, so the only safe answer is refusal.
+    """
+    repository.save_finding(make_finding(resource_ref="res-does-not-exist"))
+    gateway = FakeCloudGateway()
+
+    approved = approve_finding(
+        "f-mock", repository, resolver(gateway), actor="boaz", channel="slack", dry_run=False
+    )
+
+    assert approved is False
+    assert gateway.executed == []
+    assert repository.get_finding_by_id("f-mock").status == FindingStatus.NOTIFIED
+
+
+def test_approve_refused_when_resource_type_has_no_playbook(repository):
+    """The allowlist is the guardrail: no entry means no action, ever.
+
+    RDS is the live example — Phase 4B scans RDS instances but ships no RDS
+    playbook, because deleting a database is not a remediation this system is
+    allowed to perform.
+    """
+    seed(repository, resource_type=ResourceType.RDS_INSTANCE)
+    gateway = FakeCloudGateway()
+
+    approved = approve_finding(
+        "f-mock", repository, resolver(gateway), actor="boaz", channel="slack", dry_run=False
+    )
+
+    assert approved is False
+    assert gateway.executed == []
+    assert repository.get_finding_by_id("f-mock").status == FindingStatus.NOTIFIED
+    assert any(
+        e.event == "approve_blocked_no_playbook"
+        for e in repository.get_audit_events("f-mock")
+    )
+
+
+def test_approve_losing_the_transition_race_executes_nothing(repository):
+    """Double-click, or approve racing expiry: at most one remediation runs.
+
+    The CAS happens before the playbook call precisely so the loser stops here
+    rather than issuing a second delete against a resource already gone.
+    """
+    seed(repository)
+    _lose_every_race(repository)
+    gateway = FakeCloudGateway()
+
+    approved = approve_finding(
+        "f-mock", repository, resolver(gateway), actor="boaz", channel="slack", dry_run=False
+    )
+
+    assert approved is False
+    assert gateway.executed == []
+    assert not any(
+        e.event == "finding_approved" for e in repository.get_audit_events("f-mock")
+    )
+
+
+def test_deny_unknown_finding_is_refused(repository):
+    assert deny_finding("f-nope", repository, actor="boaz", channel="slack") is False
+
+
+def test_deny_is_illegal_from_a_terminal_status(repository):
+    """DENIED is terminal in v1, so a second Deny click is a no-op.
+
+    Enforced by TRANSITIONS rather than by the button being hidden — the
+    domain does not trust the UI to have stopped anyone.
+    """
+    seed(repository, finding_status=FindingStatus.REMEDIATED)
+
+    assert deny_finding("f-mock", repository, actor="boaz", channel="slack") is False
+    assert repository.get_finding_by_id("f-mock").status == FindingStatus.REMEDIATED
+    assert not any(
+        e.event == "finding_denied" for e in repository.get_audit_events("f-mock")
+    )
+
+
+def test_deny_losing_the_transition_race_records_nothing(repository):
+    """Deny racing an Approve: the loser must not append a second decision.
+
+    Two decision rows for one finding would make the audit trail claim it was
+    both approved and denied, with no way to tell which one actually ran.
+    """
+    seed(repository)
+    _lose_every_race(repository)
+
+    assert deny_finding("f-mock", repository, actor="boaz", channel="slack") is False
+    assert not any(
+        e.event == "finding_denied" for e in repository.get_audit_events("f-mock")
+    )
 
 
 class FakeAdvisor(Advisor):
