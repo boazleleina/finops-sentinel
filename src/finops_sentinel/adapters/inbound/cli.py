@@ -26,6 +26,18 @@ from finops_sentinel.domain.services import expire_stale, notify_open_findings, 
 app = typer.Typer(help="FinOps Sentinel - AWS Cost Optimization Agent")
 console = Console()
 
+# Provider errors arrive as multi-sentence prose with documentation URLs. The
+# summary needs the cause, not the essay.
+MAX_ERROR_CHARS = 140
+
+
+def _one_line(error: str, limit: int = MAX_ERROR_CHARS) -> str:
+    """Collapse an exception message to a single readable line."""
+    collapsed = " ".join(error.split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: limit - 1].rstrip() + "…"
+
 
 @app.command()
 def scan() -> None:
@@ -75,12 +87,23 @@ def scan() -> None:
         # Same reasoning one level down: these regions scanned, but with a blind
         # spot. Saying so beats reporting "no RDS waste" for an account whose
         # RDS calls never went through.
+        #
+        # Grouped by message, and truncated. One unavailable service produces an
+        # identical error for every scanner in every region — six paragraphs of
+        # AWS prose for a single cause, which buries the findings the scan
+        # actually came for. The full text is already in the warning log and the
+        # audit trail.
+        by_error: dict[str, list[str]] = {}
+        for scanner, error in sorted(result.scanners_failed.items()):
+            by_error.setdefault(_one_line(error), []).append(scanner)
+
         console.print(
             f"\n[bold yellow]{len(result.scanners_failed)} scanner(s) failed — "
             "those resource types were not checked:[/bold yellow]"
         )
-        for scanner, error in sorted(result.scanners_failed.items()):
-            console.print(f"  [yellow]![/yellow] {scanner}: {error}")
+        for error, scanners in by_error.items():
+            console.print(f"  [yellow]![/yellow] {', '.join(scanners)}")
+            console.print(f"    [dim]{error}[/dim]")
         console.print()
 
     if not findings:
