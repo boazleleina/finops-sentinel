@@ -21,17 +21,25 @@ PLAYBOOK_ALLOWLIST: dict[ResourceType, str] = {
     ResourceType.EBS_SNAPSHOT: "delete_ebs_snapshot",
 }
 
-# Rules whose findings are inferred from metrics rather than observed state.
-# Low CPU is evidence, not proof: a warm standby, a batch host between runs,
-# or a license server all look idle. These findings are reported for humans
-# to act on out-of-band and are NEVER remediable, even when their resource
-# type has a playbook — without this gate an ec2_idle finding on a RUNNING
-# instance would inherit terminate_stopped_instance from the type allowlist.
-NOTIFY_ONLY_RULES: frozenset[str] = frozenset({"ec2_idle"})
+# Rules the system reports but will never act on. Two reasons land a rule here.
+#
+# Metric-inferred: low CPU is evidence, not proof — a warm standby, a batch
+# host between runs, or a license server all look idle. Without this gate an
+# ec2_idle finding on a RUNNING instance would inherit
+# terminate_stopped_instance from the type-keyed allowlist below.
+#
+# Too destructive for v1: the RDS rules are state- and metric-based
+# respectively, and both are perfectly actionable — by a human. Deleting a
+# database, even with a final snapshot, is the largest irreversible action in
+# this system's reach, so RDS ships with no playbook at all. Listing the rules
+# here as well is belt and braces: the allowlist gate alone would refuse them,
+# but only after Slack had already offered an Approve button the domain
+# intends to reject.
+NOTIFY_ONLY_RULES: frozenset[str] = frozenset({"ec2_idle", "rds_idle", "rds_stopped"})
 
 
 def is_remediable(rule: str) -> bool:
-    """False for metric-inferred rules, which are advisory only."""
+    """False for advisory rules — metric-inferred, or deliberately hands-off."""
     return rule not in NOTIFY_ONLY_RULES
 
 

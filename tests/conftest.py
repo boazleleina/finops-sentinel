@@ -38,6 +38,9 @@ class FakeGatewayBase(CloudGateway):
     def describe_running_ec2_instances(self):  # pragma: no cover
         raise AssertionError("describe_running_ec2_instances not stubbed for this test")
 
+    def describe_rds_instances(self):  # pragma: no cover
+        raise AssertionError("describe_rds_instances not stubbed for this test")
+
     def get_metric_averages(
         self,
         namespace,

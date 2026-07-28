@@ -67,6 +67,13 @@ class Boto3Gateway(CloudGateway):
             aws_access_key_id=aws_access_key_id,
             aws_secret_access_key=aws_secret_access_key,
         )
+        self.rds = boto3.client(
+            "rds",
+            region_name=region,
+            endpoint_url=endpoint_url,
+            aws_access_key_id=aws_access_key_id,
+            aws_secret_access_key=aws_secret_access_key,
+        )
 
     def describe_ebs_volumes(self) -> list[dict[str, Any]]:
         volumes: list[dict[str, Any]] = []
@@ -109,6 +116,13 @@ class Boto3Gateway(CloudGateway):
         for page in page_iterator:
             for reservation in page.get("Reservations", []):
                 instances.extend(reservation.get("Instances", []))
+        return instances
+
+    def describe_rds_instances(self) -> list[dict[str, Any]]:
+        instances: list[dict[str, Any]] = []
+        paginator = self.rds.get_paginator("describe_db_instances")
+        for page in paginator.paginate():
+            instances.extend(page.get("DBInstances", []))
         return instances
 
     def get_metric_averages(

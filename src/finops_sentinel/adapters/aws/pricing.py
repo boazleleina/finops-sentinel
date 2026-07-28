@@ -78,6 +78,60 @@ DEFAULT_EC2_HOURLY = EC2_HOURLY["t3.medium"]
 ASSUMED_ROOT_VOLUME_GB = 8
 ASSUMED_ROOT_VOLUME_TYPE = "gp3"
 
+# RDS on-demand single-AZ, $/hour.
+# Source: https://aws.amazon.com/rds/postgresql/pricing/
+#
+# One table for PostgreSQL/MySQL/MariaDB, which is what this table's rates are.
+# Commercial engines cost dramatically more per hour on identical hardware
+# (SQL Server and Oracle carry license fees), so `engine` is multiplied through
+# ENGINE_MULTIPLIER below rather than ignored — an under-estimate on a SQL
+# Server instance would bury the single most expensive finding in the report.
+RDS_HOURLY: dict[str, Decimal] = {
+    "db.t3.micro": Decimal("0.018"),
+    "db.t3.small": Decimal("0.036"),
+    "db.t3.medium": Decimal("0.072"),
+    "db.t3.large": Decimal("0.145"),
+    "db.t4g.micro": Decimal("0.016"),
+    "db.t4g.small": Decimal("0.032"),
+    "db.t4g.medium": Decimal("0.065"),
+    "db.t4g.large": Decimal("0.129"),
+    "db.m5.large": Decimal("0.178"),
+    "db.m5.xlarge": Decimal("0.356"),
+    "db.m5.2xlarge": Decimal("0.712"),
+    "db.m6g.large": Decimal("0.159"),
+    "db.m6g.xlarge": Decimal("0.318"),
+    "db.r5.large": Decimal("0.240"),
+    "db.r5.xlarge": Decimal("0.480"),
+    "db.r6g.large": Decimal("0.214"),
+}
+# Same reasoning as DEFAULT_EC2_HOURLY: mid-range, so an unrecognised class is
+# neither dismissed as free nor inflated past the real findings.
+DEFAULT_RDS_HOURLY = RDS_HOURLY["db.m5.large"]
+
+# Rough license uplift over the open-source engines, applied to the hourly
+# rate. Approximate by nature — the point is that a SQL Server instance must
+# not be priced as if it were PostgreSQL.
+ENGINE_MULTIPLIER: dict[str, Decimal] = {
+    "sqlserver-ex": Decimal("1.0"),   # Express edition is license-free
+    "sqlserver-web": Decimal("1.6"),
+    "sqlserver-se": Decimal("3.5"),
+    "sqlserver-ee": Decimal("6.0"),
+    "oracle-se2": Decimal("2.5"),
+    "oracle-ee": Decimal("5.0"),
+}
+DEFAULT_ENGINE_MULTIPLIER = Decimal("1.0")
+
+# RDS storage, $/GB-month. Source: https://aws.amazon.com/rds/postgresql/pricing/
+# Pricier than plain EBS: RDS storage includes the managed-service premium.
+RDS_STORAGE_GB_MONTH: dict[str, Decimal] = {
+    "gp2": Decimal("0.115"),
+    "gp3": Decimal("0.115"),
+    "io1": Decimal("0.125"),
+    "io2": Decimal("0.125"),
+    "standard": Decimal("0.10"),
+}
+DEFAULT_RDS_STORAGE_GB_MONTH = RDS_STORAGE_GB_MONTH["gp2"]
+
 
 def _round(amount: Decimal) -> Decimal:
     return amount.quantize(CENTS, rounding=ROUND_HALF_UP)
@@ -118,3 +172,14 @@ class StaticPricing(Pricing):
         self._check_region(region)
         rate = EC2_HOURLY.get(instance_type, DEFAULT_EC2_HOURLY)
         return _round(rate * HOURS_PER_MONTH)
+
+    def rds_instance_monthly(self, instance_class: str, engine: str, region: str) -> Decimal:
+        self._check_region(region)
+        rate = RDS_HOURLY.get(instance_class, DEFAULT_RDS_HOURLY)
+        multiplier = ENGINE_MULTIPLIER.get(engine, DEFAULT_ENGINE_MULTIPLIER)
+        return _round(rate * multiplier * HOURS_PER_MONTH)
+
+    def rds_storage_monthly(self, size_gb: int, storage_type: str, region: str) -> Decimal:
+        self._check_region(region)
+        rate = RDS_STORAGE_GB_MONTH.get(storage_type, DEFAULT_RDS_STORAGE_GB_MONTH)
+        return _round(rate * Decimal(size_gb))

@@ -66,6 +66,19 @@ class Settings(BaseSettings):
     # instances, or CloudWatch gaps) — too few datapoints means no verdict.
     ec2_idle_min_datapoints: int = 24
 
+    # Idle RDS detection: a database nothing connects to is serving nobody.
+    # DatabaseConnections is the signal, not CPU — a replica can be busy on CPU
+    # and useless, or quiet on CPU and essential.
+    rds_idle_observation_days: int = 14
+    # Average connections at or below this is idle. Zero is the honest default;
+    # raise it if monitoring agents or connection poolers keep a permanent
+    # baseline open against every database.
+    rds_idle_max_connections: float = 0.0
+    rds_idle_min_datapoints: int = 24
+    # There is no rds_stopped threshold on purpose: DescribeDBInstances exposes
+    # no stopped-since timestamp, and AWS auto-restarts a stopped instance
+    # after 7 days anyway, so the state itself is the finding.
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
     @property

@@ -34,6 +34,18 @@ class CloudGateway(ABC):
         ...  # pragma: no cover
 
     @abstractmethod
+    def describe_rds_instances(self) -> list[dict[str, Any]]:
+        """Every RDS instance in the region, whatever its state.
+
+        Unlike EC2 there is no state-filtered sibling: DescribeDBInstances has
+        no server-side status filter, so callers filter on DBInstanceStatus
+        themselves. Returning every state also keeps the inventory complete —
+        an instance mid-backup must not vanish from the inventory and get swept
+        up as DELETED.
+        """
+        ...  # pragma: no cover
+
+    @abstractmethod
     def get_metric_averages(
         self,
         namespace: str,

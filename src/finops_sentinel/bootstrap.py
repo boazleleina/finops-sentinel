@@ -14,6 +14,7 @@ from finops_sentinel.adapters.aws.scanners.ebs_snapshots import OldEbsSnapshotSc
 from finops_sentinel.adapters.aws.scanners.ec2 import StoppedEC2Scanner
 from finops_sentinel.adapters.aws.scanners.ec2_idle import IdleEC2Scanner
 from finops_sentinel.adapters.aws.scanners.eip import OrphanedEIPScanner
+from finops_sentinel.adapters.aws.scanners.rds import IdleRDSScanner, StoppedRDSScanner
 from finops_sentinel.adapters.notifications.console import ConsoleNotifier
 from finops_sentinel.adapters.notifications.slack import SlackAdapter
 from finops_sentinel.adapters.persistence.sqlalchemy_repo import SqlAlchemyRepository
@@ -163,6 +164,14 @@ def get_scanners(region: str | None = None) -> list[Scanner]:
             network_threshold_bytes=settings.ec2_idle_network_bytes,
             min_datapoints=settings.ec2_idle_min_datapoints,
         ),
+        IdleRDSScanner(
+            region=region,
+            pricing=pricing,
+            observation_days=settings.rds_idle_observation_days,
+            max_connections=settings.rds_idle_max_connections,
+            min_datapoints=settings.rds_idle_min_datapoints,
+        ),
+        StoppedRDSScanner(region=region, pricing=pricing),
     ]
 
 
