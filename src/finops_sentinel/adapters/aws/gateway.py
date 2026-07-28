@@ -111,16 +111,22 @@ class Boto3Gateway(CloudGateway):
                 instances.extend(reservation.get("Instances", []))
         return instances
 
-    def get_instance_metric_averages(
-        self, instance_id: str, metric_name: str, days: int, period_seconds: int = 3600
+    def get_metric_averages(
+        self,
+        namespace: str,
+        dimension_name: str,
+        dimension_value: str,
+        metric_name: str,
+        days: int,
+        period_seconds: int = 3600,
     ) -> list[float]:
         end = datetime.now(UTC)
         start = end - timedelta(days=days)
         try:
             response = self.cloudwatch.get_metric_statistics(
-                Namespace="AWS/EC2",
+                Namespace=namespace,
                 MetricName=metric_name,
-                Dimensions=[{"Name": "InstanceId", "Value": instance_id}],
+                Dimensions=[{"Name": dimension_name, "Value": dimension_value}],
                 StartTime=start,
                 EndTime=end,
                 Period=period_seconds,
@@ -130,7 +136,12 @@ class Boto3Gateway(CloudGateway):
             # A metrics outage must not fail the whole scan; an empty series
             # reads as "unknown" downstream, which suppresses the finding.
             logger.warning(
-                "CloudWatch %s lookup failed for %s: %s", metric_name, instance_id, exc
+                "CloudWatch %s/%s lookup failed for %s=%s: %s",
+                namespace,
+                metric_name,
+                dimension_name,
+                dimension_value,
+                exc,
             )
             return []
 

@@ -11,6 +11,46 @@ from moto import mock_aws
 
 from finops_sentinel.adapters.persistence.sqlalchemy_repo import Base, SqlAlchemyRepository
 from finops_sentinel.config import settings
+from finops_sentinel.ports.cloud import CloudGateway
+
+
+class FakeGatewayBase(CloudGateway):
+    """Every CloudGateway method, each refusing to be called.
+
+    Test fakes subclass this and override only what their scenario needs, so a
+    scanner that reaches for a port it should not touch fails loudly instead of
+    quietly receiving an empty list. It also means adding a method to the port
+    updates every fake in one place rather than N.
+    """
+
+    def describe_ebs_volumes(self):  # pragma: no cover
+        raise AssertionError("describe_ebs_volumes not stubbed for this test")
+
+    def describe_elastic_ips(self):  # pragma: no cover
+        raise AssertionError("describe_elastic_ips not stubbed for this test")
+
+    def describe_ec2_instances(self):  # pragma: no cover
+        raise AssertionError("describe_ec2_instances not stubbed for this test")
+
+    def describe_ebs_snapshots(self):  # pragma: no cover
+        raise AssertionError("describe_ebs_snapshots not stubbed for this test")
+
+    def describe_running_ec2_instances(self):  # pragma: no cover
+        raise AssertionError("describe_running_ec2_instances not stubbed for this test")
+
+    def get_metric_averages(
+        self,
+        namespace,
+        dimension_name,
+        dimension_value,
+        metric_name,
+        days,
+        period_seconds=3600,
+    ):  # pragma: no cover
+        raise AssertionError("get_metric_averages not stubbed for this test")
+
+    def execute(self, playbook, resource_id, dry_run):  # pragma: no cover
+        raise AssertionError("execute not stubbed for this test")
 
 
 @pytest.fixture(autouse=True)

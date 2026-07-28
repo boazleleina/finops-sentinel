@@ -34,16 +34,30 @@ class CloudGateway(ABC):
         ...  # pragma: no cover
 
     @abstractmethod
-    def get_instance_metric_averages(
-        self, instance_id: str, metric_name: str, days: int, period_seconds: int = 3600
+    def get_metric_averages(
+        self,
+        namespace: str,
+        dimension_name: str,
+        dimension_value: str,
+        metric_name: str,
+        days: int,
+        period_seconds: int = 3600,
     ) -> list[float]:
         """
-        Per-period averages for one instance metric (e.g. "CPUUtilization",
-        "NetworkIn") over the trailing `days`, oldest first.
+        Per-period averages for one CloudWatch metric over the trailing `days`,
+        oldest first.
 
-        Returns an empty list when the provider has no data. Callers must
-        treat a short series as "unknown", not as "idle" — see
-        ec2_idle_min_datapoints.
+        Namespace and dimension are caller-supplied so a single method serves
+        every service rather than growing one near-identical method per
+        resource kind:
+
+            ("AWS/EC2", "InstanceId",           "i-0abc...")  CPUUtilization
+            ("AWS/RDS", "DBInstanceIdentifier", "prod-db")     DatabaseConnections
+            ("AWS/S3",  "BucketName",           "my-bucket")   BucketSizeBytes
+
+        Returns an empty list when the provider has no data. Callers must treat
+        a short series as "unknown" rather than as a verdict — see the
+        *_min_datapoints settings.
         """
         ...  # pragma: no cover
 
