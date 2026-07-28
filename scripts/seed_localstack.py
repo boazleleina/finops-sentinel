@@ -172,6 +172,28 @@ def seed_region(region: str) -> None:
     seed_buckets(region, profile)
 
 
+def ensure_bucket(s3, name, create_args):
+    """Create the bucket, or accept that a previous seed already did.
+
+    Every other resource here gets a fresh server-assigned id per run, so
+    re-seeding just piles up more of them. Bucket names are fixed, so a second
+    run collides — and the whole script used to abort on it, part way through,
+    leaving the S3 seed half-applied.
+
+    Returns True when the bucket is newly created.
+    """
+    try:
+        s3.create_bucket(Bucket=name, **create_args)
+        return True
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] not in (
+            "BucketAlreadyOwnedByYou",
+            "BucketAlreadyExists",
+        ):
+            raise
+        return False
+
+
 def seed_buckets(region, profile):
     """Four buckets covering every branch of the S3 rules.
 
@@ -180,6 +202,10 @@ def seed_buckets(region, profile):
     alternative is an unbounded ListObjectsV2 walk against real buckets. So the
     sizes are published here as synthetic datapoints, exactly as
     publish_idle_metrics already does for AWS/EC2.
+
+    Re-runnable: buckets that already exist are reconfigured rather than
+    recreated, and the abandoned upload is only started if there is not one
+    already, so repeated seeding does not stack up duplicates.
     """
     s3 = boto3.client("s3", region_name=region, endpoint_url=ENDPOINT_URL)
     suffix = region.replace("_", "-")
@@ -192,16 +218,17 @@ def seed_buckets(region, profile):
 
     # 1. Large, no lifecycle policy, versioning on — the full s3_no_lifecycle case.
     unmanaged = f"finops-demo-unmanaged-{suffix}"
-    s3.create_bucket(Bucket=unmanaged, **create_args)
+    fresh = ensure_bucket(s3, unmanaged, create_args)
     s3.put_bucket_versioning(
         Bucket=unmanaged, VersioningConfiguration={"Status": "Enabled"}
     )
     publish_bucket_size(unmanaged, region, size_gb)
-    print(f"  Created unmanaged bucket: {unmanaged} ({size_gb} GB, versioned)")
+    print(f"  {'Created' if fresh else 'Refreshed'} unmanaged bucket: "
+          f"{unmanaged} ({size_gb} GB, versioned)")
 
     # 2. Same size, but has a policy — must NOT be flagged.
     managed = f"finops-demo-managed-{suffix}"
-    s3.create_bucket(Bucket=managed, **create_args)
+    fresh = ensure_bucket(s3, managed, create_args)
     s3.put_bucket_lifecycle_configuration(
         Bucket=managed,
         LifecycleConfiguration={
@@ -216,21 +243,22 @@ def seed_buckets(region, profile):
         },
     )
     publish_bucket_size(managed, region, size_gb)
-    print(f"  Created managed bucket: {managed} (has lifecycle policy)")
+    print(f"  {'Created' if fresh else 'Refreshed'} managed bucket: "
+          f"{managed} (has lifecycle policy)")
 
     # 3. Protected by tag — the domain must exclude it despite being unmanaged.
     protected = f"finops-demo-protected-{suffix}"
-    s3.create_bucket(Bucket=protected, **create_args)
+    fresh = ensure_bucket(s3, protected, create_args)
     s3.put_bucket_tagging(
         Bucket=protected,
         Tagging={"TagSet": [{"Key": "finops:protected", "Value": "true"}]},
     )
     publish_bucket_size(protected, region, size_gb)
-    print(f"  Created protected bucket: {protected}")
+    print(f"  {'Created' if fresh else 'Refreshed'} protected bucket: {protected}")
 
     # 4. An abandoned multipart upload — the one remediable S3 finding.
     uploads = f"finops-demo-uploads-{suffix}"
-    s3.create_bucket(Bucket=uploads, **create_args)
+    ensure_bucket(s3, uploads, create_args)
     s3.put_bucket_lifecycle_configuration(
         Bucket=uploads,
         LifecycleConfiguration={
@@ -240,14 +268,20 @@ def seed_buckets(region, profile):
             ]
         },
     )
-    upload_id = s3.create_multipart_upload(Bucket=uploads, Key="abandoned-backup.tar")[
-        "UploadId"
-    ]
-    s3.upload_part(
-        Bucket=uploads, Key="abandoned-backup.tar", UploadId=upload_id,
-        PartNumber=1, Body=b"x" * (5 * 1024 * 1024),
-    )
-    print(f"  Created abandoned multipart upload in {uploads} (5 MB part)")
+    existing = s3.list_multipart_uploads(Bucket=uploads).get("Uploads", [])
+    if existing:
+        # Starting another one per seed run would inflate the finding's byte
+        # count and make the demo's numbers drift every time.
+        print(f"  Abandoned multipart upload already present in {uploads}")
+    else:
+        upload_id = s3.create_multipart_upload(
+            Bucket=uploads, Key="abandoned-backup.tar"
+        )["UploadId"]
+        s3.upload_part(
+            Bucket=uploads, Key="abandoned-backup.tar", UploadId=upload_id,
+            PartNumber=1, Body=b"x" * (5 * 1024 * 1024),
+        )
+        print(f"  Created abandoned multipart upload in {uploads} (5 MB part)")
     # Initiated is stamped server-side, so a freshly seeded upload is minutes
     # old and the default 7-day threshold correctly ignores it. Say so, or the
     # one remediable S3 finding looks broken rather than newly created.
