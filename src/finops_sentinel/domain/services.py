@@ -60,23 +60,61 @@ class ScanTarget(NamedTuple):
 
 
 class ScanResult(NamedTuple):
-    """Findings plus which regions actually produced them.
+    """Findings plus what actually produced them, and what did not.
 
-    regions_failed is part of the result rather than a log line because a
+    Both failure maps are part of the result rather than log lines because a
     partial scan looks exactly like a clean account from the findings alone.
+
+    scanners_failed is keyed "region/ScannerName" — one entry per scanner that
+    could not complete discovery in a region that otherwise scanned fine.
     """
 
     findings: list[Finding]
     regions_scanned: list[str]
     regions_failed: dict[str, str]
+    scanners_failed: dict[str, str] = {}  # noqa: RUF012 — NamedTuple default, never mutated
+    # Resources THIS scan saw in the cloud. Not the same as the repository's
+    # row count, which also holds every resource ever seen and since deleted.
+    resources_discovered: int = 0
 
 
-def _discover_target(target: ScanTarget) -> list[tuple[Resource, dict[str, Any]]]:
-    """Pass 1 for a single region. Runs on a worker thread — no repo access."""
+class _Discovery(NamedTuple):
+    resources: list[tuple[Resource, dict[str, Any]]]
+    # Position in target.scanners -> error, for the ones that raised. Keyed by
+    # index rather than class name so two scanners of the same class in one
+    # region stay distinct: collapsing them would both under-count failures
+    # (hiding a fully blind region) and, in pass 2, skip a scanner that
+    # actually succeeded.
+    failures: dict[int, str]
+
+
+def _discover_target(target: ScanTarget) -> _Discovery:
+    """Pass 1 for a single region. Runs on a worker thread — no repo access.
+
+    Each scanner is isolated. The region-level guard in run_scan stops one bad
+    region blinding the others; this is the same argument one level down, and
+    it matters just as much: the scanners share a gateway but not a blast
+    radius. A service the account has no grant for, or that the endpoint does
+    not implement at all, must not take the other five scanners' findings down
+    with it — that turns a missing IAM permission into a silent, total loss of
+    visibility, which is the most expensive failure mode this tool has.
+    """
     discovered: list[tuple[Resource, dict[str, Any]]] = []
-    for scanner in target.scanners:
-        discovered.extend(scanner.discover(target.gateway))
-    return discovered
+    failures: dict[int, str] = {}
+
+    for index, scanner in enumerate(target.scanners):
+        try:
+            discovered.extend(scanner.discover(target.gateway))
+        except Exception as exc:  # noqa: BLE001 — one bad scanner must not end the region
+            failures[index] = f"{type(exc).__name__}: {exc}"
+            logger.warning(
+                "Scanner %s failed in region %s: %s",
+                type(scanner).__name__,
+                target.region,
+                exc,
+            )
+
+    return _Discovery(resources=discovered, failures=failures)
 
 
 def run_scan(
@@ -113,20 +151,59 @@ def run_scan(
 
     inventory_by_region: dict[str, list[tuple[Resource, dict[str, Any]]]] = {}
     failed_regions: dict[str, str] = {}
+    # Scanner class names that failed discovery, per region. Pass 2 skips them:
+    # a scanner whose discover() raised may hold half-populated state (the idle
+    # scanners cache metric series between the two passes), so evaluating it
+    # would judge instances on a partial series.
+    failed_scanners_by_region: dict[str, dict[int, str]] = {}
 
     workers = max(1, min(max_workers, len(targets)))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_discover_target, target): target for target in targets}
         for future in as_completed(futures):
-            region = futures[future].region
+            target = futures[future]
+            region = target.region
             try:
-                inventory_by_region[region] = future.result()
-            except Exception as exc:  # noqa: BLE001 — one bad region must not end the scan
+                discovery = future.result()
+            except Exception as exc:  # noqa: BLE001  # pragma: no cover - backstop
+                # Unreachable by construction: _discover_target catches every
+                # scanner exception itself, so nothing propagates here. Kept
+                # anyway — if a future edit lets something escape that function,
+                # the cost of not catching it is the entire multi-region scan,
+                # and this is three lines.
                 failed_regions[region] = f"{type(exc).__name__}: {exc}"
                 logger.warning("Scan of region %s failed: %s", region, exc)
+                continue
+
+            if target.scanners and len(discovery.failures) == len(target.scanners):
+                # Every scanner failed: the region is blind, not clean. Treat it
+                # as a failed region so the DELETED sweep skips it and nothing
+                # here gets disarmed.
+                failed_regions[region] = "; ".join(
+                    f"{type(target.scanners[index]).__name__}: {error}"
+                    for index, error in sorted(discovery.failures.items())
+                )
+                continue
+
+            inventory_by_region[region] = discovery.resources
+            if discovery.failures:
+                failed_scanners_by_region[region] = discovery.failures
 
     for region, error in failed_regions.items():
         _audit(repo, "region_scan_failed", None, {"region": region, "error": error})
+
+    scanners_by_region = {target.region: target.scanners for target in targets}
+    scanners_failed: dict[str, str] = {}
+    for region, failures in failed_scanners_by_region.items():
+        for index, error in sorted(failures.items()):
+            name = type(scanners_by_region[region][index]).__name__
+            scanners_failed[f"{region}/{name}"] = error
+            _audit(
+                repo,
+                "scanner_failed",
+                None,
+                {"region": region, "scanner": name, "error": error},
+            )
 
     if targets and not inventory_by_region:
         raise RuntimeError(
@@ -150,7 +227,10 @@ def run_scan(
         inventory = inventory_by_region.get(target.region)
         if inventory is None:
             continue
-        for scanner in target.scanners:
+        blind = failed_scanners_by_region.get(target.region, {})
+        for index, scanner in enumerate(target.scanners):
+            if index in blind:
+                continue
             findings = scanner.evaluate(inventory)
             all_findings.extend(findings)
 
@@ -164,6 +244,7 @@ def run_scan(
         {
             "regions_scanned": scanned_regions,
             "regions_failed": sorted(failed_regions),
+            "scanners_failed": sorted(scanners_failed),
             "resources_discovered": discovered_count,
             "findings": len(all_findings),
         },
@@ -172,6 +253,8 @@ def run_scan(
         findings=all_findings,
         regions_scanned=scanned_regions,
         regions_failed=failed_regions,
+        scanners_failed=scanners_failed,
+        resources_discovered=discovered_count,
     )
 
 

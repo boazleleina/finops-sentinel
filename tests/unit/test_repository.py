@@ -1,6 +1,8 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
+
 from finops_sentinel.domain.models import (
     AuditEvent,
     Decision,
@@ -28,6 +30,40 @@ def make_finding(finding_id="f-1", status=FindingStatus.OPEN, **overrides):
     }
     defaults.update(overrides)
     return Finding(**defaults)
+
+
+def test_unknown_resource_type_says_to_migrate(repository):
+    """A database from an older version must not fail with a raw SQL error.
+
+    Failing hard is right — a half-written inventory is worse than a stopped
+    scan — but the CHECK-constraint traceback tells nobody what to do next.
+    """
+    import sqlalchemy as sa
+
+    # Narrow the live constraint to what an older schema allowed.
+    with repository.engine.begin() as conn:
+        conn.execute(sa.text("DROP TABLE resources"))
+        conn.execute(
+            sa.text(
+                "CREATE TABLE resources ("
+                "id VARCHAR NOT NULL PRIMARY KEY, resource_id VARCHAR NOT NULL, "
+                "resource_type VARCHAR NOT NULL, resource_arn VARCHAR NOT NULL, "
+                "region VARCHAR NOT NULL, current_tags VARCHAR NOT NULL, "
+                "lifecycle VARCHAR NOT NULL, first_seen_at DATETIME NOT NULL, "
+                "last_seen_at DATETIME NOT NULL, "
+                "CONSTRAINT check_resource_type CHECK (resource_type IN ('ebs_volume')))"
+            )
+        )
+
+    now = datetime.now(UTC)
+    bucket = Resource(
+        id="r-1", resource_id="my-bucket", resource_type=ResourceType.S3_BUCKET,
+        resource_arn="arn:aws:s3:::my-bucket", region="us-east-1", current_tags={},
+        lifecycle=ResourceLifecycle.ACTIVE, first_seen_at=now, last_seen_at=now,
+    )
+
+    with pytest.raises(RuntimeError, match="alembic upgrade head"):
+        repository.upsert_resource(bucket)
 
 
 def test_upsert_resource(repository):

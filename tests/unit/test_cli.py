@@ -9,7 +9,35 @@ from typer.testing import CliRunner
 
 from finops_sentinel.adapters.advisor.ollama import OllamaAdvisor
 from finops_sentinel.adapters.advisor.template import TemplateAdvisor
-from finops_sentinel.adapters.inbound.cli import app
+from finops_sentinel.adapters.inbound.cli import _one_line, app
+
+
+def test_one_line_collapses_and_truncates_provider_prose():
+    """One dead service yields the same essay per scanner per region.
+
+    Printed in full that is six paragraphs of AWS prose for a single cause,
+    which buries the findings the scan actually ran for.
+    """
+    sprawling = (
+        "ClientError: An error occurred (InternalFailure) when calling the\n"
+        "DescribeDBInstances operation: Sorry, the rds service is not included "
+        "within your LocalStack license, but is available in an upgraded "
+        "license. Please refer to https://docs.localstack.cloud/references/"
+        "coverage for more details."
+    )
+
+    result = _one_line(sprawling)
+
+    assert "\n" not in result
+    assert len(result) <= 140
+    assert result.startswith("ClientError: An error occurred (InternalFailure)")
+    assert result.endswith("…")
+
+
+def test_one_line_leaves_short_messages_alone():
+    assert _one_line("AccessDenied: rds:DescribeDBInstances") == (
+        "AccessDenied: rds:DescribeDBInstances"
+    )
 from finops_sentinel.domain.models import (
     Finding,
     FindingStatus,

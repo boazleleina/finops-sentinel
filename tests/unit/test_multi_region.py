@@ -22,8 +22,8 @@ from finops_sentinel.domain.models import (
     ResourceType,
 )
 from finops_sentinel.domain.services import ScanTarget, approve_finding, run_scan
-from finops_sentinel.ports.cloud import CloudGateway
 from finops_sentinel.ports.scanner import Scanner
+from tests.fakes import FakeGatewayBase
 
 
 def make_resource(resource_id, region, resource_type=ResourceType.EBS_VOLUME, seen=None):
@@ -75,7 +75,7 @@ class RegionScanner(Scanner):
         ]
 
 
-class RecordingGateway(CloudGateway):
+class RecordingGateway(FakeGatewayBase):
     """Knows which region it was built for; records what it executed."""
 
     def __init__(self, region):
@@ -88,7 +88,9 @@ class RecordingGateway(CloudGateway):
     def describe_ebs_snapshots(self): return []
     def describe_running_ec2_instances(self): return []
 
-    def get_instance_metric_averages(self, instance_id, metric_name, days, period_seconds=3600):
+    def get_metric_averages(
+        self, namespace, dimensions, metric_name, days, period_seconds=3600
+    ):
         return []
 
     def execute(self, playbook, resource_id, dry_run):

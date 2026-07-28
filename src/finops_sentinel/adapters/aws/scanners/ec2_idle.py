@@ -59,8 +59,11 @@ class IdleEC2Scanner(Scanner):
             tags_dict = {t["Key"]: t["Value"] for t in tags} if isinstance(tags, list) else tags
 
             self._metrics[instance_id] = {
-                metric: gateway.get_instance_metric_averages(
-                    instance_id, metric, self.observation_days
+                metric: gateway.get_metric_averages(
+                    namespace="AWS/EC2",
+                    dimensions={"InstanceId": instance_id},
+                    metric_name=metric,
+                    days=self.observation_days,
                 )
                 for metric in ("CPUUtilization", "NetworkIn", "NetworkOut")
             }

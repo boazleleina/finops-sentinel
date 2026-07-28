@@ -5,40 +5,26 @@ from decimal import Decimal
 from finops_sentinel.adapters.aws.pricing import StaticPricing
 from finops_sentinel.adapters.aws.scanners.ec2_idle import IdleEC2Scanner
 from finops_sentinel.domain.models import Resource, ResourceLifecycle, ResourceType
-from finops_sentinel.ports.cloud import CloudGateway
+from tests.fakes import FakeGatewayBase
 
 
-class FakeMetricsGateway(CloudGateway):
+class FakeMetricsGateway(FakeGatewayBase):
     """Serves canned instances and metric series; unused ports raise."""
 
     def __init__(self, instances, metrics):
         self.instances = instances
         self.metrics = metrics
-        self.metric_calls: list[tuple[str, str, int]] = []
+        self.metric_calls: list[tuple[str, str, str, int]] = []
 
     def describe_running_ec2_instances(self):
         return self.instances
 
-    def get_instance_metric_averages(
-        self, instance_id, metric_name, days, period_seconds=3600
+    def get_metric_averages(
+        self, namespace, dimensions, metric_name, days, period_seconds=3600
     ):
-        self.metric_calls.append((instance_id, metric_name, days))
+        instance_id = dimensions["InstanceId"]
+        self.metric_calls.append((namespace, instance_id, metric_name, days))
         return self.metrics.get(instance_id, {}).get(metric_name, [])
-
-    def describe_ebs_volumes(self):  # pragma: no cover
-        raise AssertionError("not used")
-
-    def describe_elastic_ips(self):  # pragma: no cover
-        raise AssertionError("not used")
-
-    def describe_ec2_instances(self):  # pragma: no cover
-        raise AssertionError("not used")
-
-    def describe_ebs_snapshots(self):  # pragma: no cover
-        raise AssertionError("not used")
-
-    def execute(self, playbook, resource_id, dry_run):  # pragma: no cover
-        raise AssertionError("not used")
 
 
 def _instance(instance_id, instance_type="m5.large", tags=None):

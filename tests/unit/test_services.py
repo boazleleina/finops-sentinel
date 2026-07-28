@@ -4,9 +4,7 @@ from decimal import Decimal
 import pytest
 
 from finops_sentinel.domain.models import (
-    Finding,
     FindingStatus,
-    Resource,
     ResourceLifecycle,
     ResourceType,
 )
@@ -19,29 +17,9 @@ from finops_sentinel.domain.services import (
     run_scan,
 )
 from finops_sentinel.ports.advisor import Advisor
-from finops_sentinel.ports.cloud import CloudGateway
 from finops_sentinel.ports.notifier import Notifier
 from finops_sentinel.ports.scanner import Scanner
-
-
-def make_resource(res_id="res-mock", resource_id="vol-123",
-                  resource_type=ResourceType.EBS_VOLUME, tags=None):
-    now = datetime.now(UTC)
-    return Resource(
-        id=res_id, resource_id=resource_id, resource_type=resource_type,
-        resource_arn="arn", region="us-east-1", current_tags=tags or {},
-        lifecycle=ResourceLifecycle.ACTIVE, first_seen_at=now, last_seen_at=now
-    )
-
-
-def make_finding(finding_id="f-mock", status=FindingStatus.NOTIFIED,
-                 resource_ref="res-mock", protected=False, rule="ebs"):
-    now = datetime.now(UTC)
-    return Finding(
-        id=finding_id, resource_ref=resource_ref, rule=rule, evidence={},
-        tags_at_detection={}, est_monthly_cost_usd=Decimal("1.00"),
-        status=status, protected=protected, detected_at=now, last_seen_at=now
-    )
+from tests.fakes import FakeCloudGateway, make_finding, make_resource, resolver
 
 
 class MockScanner(Scanner):
@@ -51,36 +29,6 @@ class MockScanner(Scanner):
     def evaluate(self, discover_results):
         res = discover_results[0][0]
         return [make_finding(status=FindingStatus.OPEN, resource_ref=res.id)]
-
-
-class FakeCloudGateway(CloudGateway):
-    """In-memory gateway: records executed playbooks, can be told to fail."""
-
-    def __init__(self, fail=False):
-        self.executed = []
-        self.fail = fail
-
-    def describe_ebs_volumes(self): return []
-    def describe_elastic_ips(self): return []
-    def describe_ec2_instances(self): return []
-    def describe_ebs_snapshots(self): return []
-    def describe_running_ec2_instances(self): return []
-
-    def get_instance_metric_averages(
-        self, instance_id, metric_name, days, period_seconds=3600
-    ):
-        return []
-
-    def execute(self, playbook, resource_id, dry_run):
-        if self.fail:
-            raise RuntimeError("cloud exploded")
-        self.executed.append((playbook, resource_id, dry_run))
-        return {"snapshot_id": f"snap-{resource_id}"} if not dry_run else {"dry_run": True}
-
-
-def resolver(gateway):
-    """approve_finding takes a region -> gateway resolver, not a gateway."""
-    return lambda _region: gateway
 
 
 class FakeNotifier(Notifier):
@@ -310,6 +258,292 @@ def test_approve_still_works_for_state_based_ec2_rule(repository):
 
     assert approved is True
     assert gateway.executed == [("terminate_stopped_instance", "vol-123", False)]
+
+
+class ExplodingScanner(Scanner):
+    """A scanner whose service is unreachable — no grant, or no such service."""
+
+    def __init__(self, error="AccessDenied: rds:DescribeDBInstances"):
+        self.error = error
+        self.evaluated = False
+
+    def discover(self, gateway):
+        raise RuntimeError(self.error)
+
+    def evaluate(self, discover_results):  # pragma: no cover - must never run
+        self.evaluated = True
+        return []
+
+
+def test_resources_discovered_counts_this_scan_not_the_whole_table(repository):
+    """The repository also holds every resource ever seen and since deleted.
+
+    Reporting its row count as "discovered" made a 30-resource environment
+    claim hundreds, purely from earlier scans of resources long gone.
+    """
+    run_scan([ScanTarget("us-east-1", None, [MockScanner()])], repository)
+
+    class EmptyScanner(Scanner):
+        def discover(self, gateway):
+            return []
+
+        def evaluate(self, discover_results):
+            return []
+
+    result = run_scan([ScanTarget("us-east-1", None, [EmptyScanner()])], repository)
+
+    assert result.resources_discovered == 0
+    # The row is still on file — now marked DELETED, which is exactly the
+    # difference the old count papered over.
+    assert len(repository.get_all_resources()) == 1
+
+
+def test_one_failing_scanner_does_not_blind_the_others(repository):
+    """A missing IAM grant on one service must not cost every other finding.
+
+    Without per-scanner isolation this is a total loss of visibility that looks
+    identical to a clean account — the most expensive failure this tool has.
+    """
+    exploding = ExplodingScanner()
+    result = run_scan(
+        [ScanTarget("us-east-1", None, [MockScanner(), exploding])], repository
+    )
+
+    assert len(result.findings) == 1
+    assert result.regions_scanned == ["us-east-1"]
+    assert result.regions_failed == {}
+    assert "us-east-1/ExplodingScanner" in result.scanners_failed
+    assert "AccessDenied" in result.scanners_failed["us-east-1/ExplodingScanner"]
+    assert any(e.event == "scanner_failed" for e in repository.get_audit_events())
+
+
+def test_a_failed_scanner_is_not_evaluated(repository):
+    """discover() raising can leave half-built state behind.
+
+    The idle scanners cache metric series between discover and evaluate, so
+    evaluating one that failed mid-discovery would judge instances on a partial
+    series — exactly the false positive min_datapoints exists to prevent.
+    """
+    exploding = ExplodingScanner()
+    run_scan([ScanTarget("us-east-1", None, [MockScanner(), exploding])], repository)
+
+    assert exploding.evaluated is False
+
+
+def test_region_where_every_scanner_fails_counts_as_a_failed_region(repository):
+    """Blind is not clean: the DELETED sweep must skip that region.
+
+    Otherwise a total outage in one region marks its whole inventory DELETED,
+    and approve_finding then refuses every finding that region owns.
+
+    Reported as a failed REGION, not as N failed scanners: nothing came back at
+    all, so there is no partial inventory to reason about.
+    """
+    result = run_scan(
+        [
+            ScanTarget("us-east-1", None, [MockScanner()]),
+            ScanTarget("eu-west-1", None, [ExplodingScanner(), ExplodingScanner()]),
+        ],
+        repository,
+    )
+
+    assert len(result.findings) == 1
+    assert result.regions_scanned == ["us-east-1"]
+    assert "eu-west-1" in result.regions_failed
+    # Both instances of the same scanner class are counted, or the region would
+    # look partially healthy and get swept.
+    assert result.regions_failed["eu-west-1"].count("ExplodingScanner") == 2
+    assert result.scanners_failed == {}
+
+
+def test_every_region_failing_is_still_fatal(repository):
+    """No findings from a total blackout must never read as a clean account."""
+    with pytest.raises(RuntimeError, match="Every region failed"):
+        run_scan(
+            [ScanTarget("us-east-1", None, [ExplodingScanner()])], repository
+        )
+
+
+def test_partial_scanner_failure_still_sweeps_the_region(repository):
+    """A region that mostly worked is still swept, so real deletions register."""
+    run_scan([ScanTarget("us-east-1", None, [MockScanner()])], repository)
+    assert repository.get_all_resources()[0].lifecycle == ResourceLifecycle.ACTIVE
+
+    # Next scan: the resource is gone from the cloud, one scanner is broken.
+    class EmptyScanner(Scanner):
+        def discover(self, gateway):
+            return []
+
+        def evaluate(self, discover_results):
+            return []
+
+    run_scan(
+        [ScanTarget("us-east-1", None, [EmptyScanner(), ExplodingScanner()])],
+        repository,
+    )
+
+    assert repository.get_all_resources()[0].lifecycle == ResourceLifecycle.DELETED
+
+
+# --------------------------------------------------------------------------
+# Guardrail and concurrency branches
+#
+# These are the refusal paths: the checks that run when the world changed
+# between detection and approval, or when two actors decide at once. They are
+# the least likely code to execute in a happy-path test and the most expensive
+# to get wrong, since every one of them stands between an operator's click and
+# an irreversible AWS call.
+# --------------------------------------------------------------------------
+
+
+def _lose_every_race(repository):
+    """Make every compare-and-swap report that someone else got there first."""
+    repository.transition_finding = lambda *args, **kwargs: False
+
+
+def test_notify_skips_finding_whose_resource_vanished(repository):
+    """A finding can outlive its resource row; notifying it would crash.
+
+    send_finding_alert needs the Resource for region, type, and tags, so a
+    dangling resource_ref has to be skipped rather than passed through as None.
+    """
+    repository.save_finding(
+        make_finding(status=FindingStatus.OPEN, resource_ref="res-does-not-exist")
+    )
+    notifier = FakeNotifier()
+
+    assert notify_open_findings(repository, notifier) == []
+    assert notifier.alerts == []
+    # Still OPEN, so a later scan that re-discovers the resource can notify it.
+    assert repository.get_finding_by_id("f-mock").status == FindingStatus.OPEN
+
+
+def test_notify_losing_the_transition_race_does_not_record_a_notification(repository):
+    """Two notifiers on the same finding: the alert may duplicate, state may not.
+
+    The CAS is what makes concurrent scans safe. The loser must not append a
+    notification row, or expire_stale would later measure staleness from a
+    notification that this process only half-sent.
+    """
+    seed(repository, finding_status=FindingStatus.OPEN)
+    _lose_every_race(repository)
+    notifier = FakeNotifier()
+
+    assert notify_open_findings(repository, notifier) == []
+    # The alert did go out — the race was lost after the send, not before.
+    assert len(notifier.alerts) == 1
+    assert repository.get_latest_notification_time("f-mock") is None
+    assert not any(
+        e.event == "finding_notified" for e in repository.get_audit_events("f-mock")
+    )
+
+
+def test_approve_unknown_finding_is_refused(repository):
+    """A stale Slack button from a wiped database must not raise."""
+    gateway = FakeCloudGateway()
+
+    approved = approve_finding(
+        "f-nope", repository, resolver(gateway), actor="boaz", channel="slack", dry_run=False
+    )
+
+    assert approved is False
+    assert gateway.executed == []
+
+
+def test_approve_refused_when_the_resource_row_is_missing(repository):
+    """Distinct from the DELETED case: here there is no row to check at all.
+
+    Without the resource there is no region to resolve a gateway for and no
+    tags to re-check protection against, so the only safe answer is refusal.
+    """
+    repository.save_finding(make_finding(resource_ref="res-does-not-exist"))
+    gateway = FakeCloudGateway()
+
+    approved = approve_finding(
+        "f-mock", repository, resolver(gateway), actor="boaz", channel="slack", dry_run=False
+    )
+
+    assert approved is False
+    assert gateway.executed == []
+    assert repository.get_finding_by_id("f-mock").status == FindingStatus.NOTIFIED
+
+
+def test_approve_refused_when_resource_type_has_no_playbook(repository):
+    """The allowlist is the guardrail: no entry means no action, ever.
+
+    RDS is the live example — Phase 4B scans RDS instances but ships no RDS
+    playbook, because deleting a database is not a remediation this system is
+    allowed to perform.
+    """
+    seed(repository, resource_type=ResourceType.RDS_INSTANCE)
+    gateway = FakeCloudGateway()
+
+    approved = approve_finding(
+        "f-mock", repository, resolver(gateway), actor="boaz", channel="slack", dry_run=False
+    )
+
+    assert approved is False
+    assert gateway.executed == []
+    assert repository.get_finding_by_id("f-mock").status == FindingStatus.NOTIFIED
+    assert any(
+        e.event == "approve_blocked_no_playbook"
+        for e in repository.get_audit_events("f-mock")
+    )
+
+
+def test_approve_losing_the_transition_race_executes_nothing(repository):
+    """Double-click, or approve racing expiry: at most one remediation runs.
+
+    The CAS happens before the playbook call precisely so the loser stops here
+    rather than issuing a second delete against a resource already gone.
+    """
+    seed(repository)
+    _lose_every_race(repository)
+    gateway = FakeCloudGateway()
+
+    approved = approve_finding(
+        "f-mock", repository, resolver(gateway), actor="boaz", channel="slack", dry_run=False
+    )
+
+    assert approved is False
+    assert gateway.executed == []
+    assert not any(
+        e.event == "finding_approved" for e in repository.get_audit_events("f-mock")
+    )
+
+
+def test_deny_unknown_finding_is_refused(repository):
+    assert deny_finding("f-nope", repository, actor="boaz", channel="slack") is False
+
+
+def test_deny_is_illegal_from_a_terminal_status(repository):
+    """DENIED is terminal in v1, so a second Deny click is a no-op.
+
+    Enforced by TRANSITIONS rather than by the button being hidden — the
+    domain does not trust the UI to have stopped anyone.
+    """
+    seed(repository, finding_status=FindingStatus.REMEDIATED)
+
+    assert deny_finding("f-mock", repository, actor="boaz", channel="slack") is False
+    assert repository.get_finding_by_id("f-mock").status == FindingStatus.REMEDIATED
+    assert not any(
+        e.event == "finding_denied" for e in repository.get_audit_events("f-mock")
+    )
+
+
+def test_deny_losing_the_transition_race_records_nothing(repository):
+    """Deny racing an Approve: the loser must not append a second decision.
+
+    Two decision rows for one finding would make the audit trail claim it was
+    both approved and denied, with no way to tell which one actually ran.
+    """
+    seed(repository)
+    _lose_every_race(repository)
+
+    assert deny_finding("f-mock", repository, actor="boaz", channel="slack") is False
+    assert not any(
+        e.event == "finding_denied" for e in repository.get_audit_events("f-mock")
+    )
 
 
 class FakeAdvisor(Advisor):

@@ -32,6 +32,8 @@ class ResourceType(StrEnum):
     ELASTIC_IP = "elastic_ip"
     EC2_INSTANCE = "ec2_instance"
     EBS_SNAPSHOT = "ebs_snapshot"
+    RDS_INSTANCE = "rds_instance"
+    S3_BUCKET = "s3_bucket"
 
 class Resource(BaseModel):                     
     id: str                                    

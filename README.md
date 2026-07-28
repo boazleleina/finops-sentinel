@@ -99,7 +99,7 @@ erDiagram
     RESOURCES {
         string id PK "UUID"
         string resource_id "e.g., vol-12345"
-        string resource_type "Enum: ebs_volume, elastic_ip, etc"
+        string resource_type "Enum: ebs_volume, elastic_ip, ec2_instance, ebs_snapshot, rds_instance, s3_bucket"
         string resource_arn "AWS ARN"
         string region "e.g., us-east-1"
         json current_tags "Raw AWS Tags"
@@ -207,6 +207,15 @@ Gate-check the local model at any time:
 sentinel smoke-llm --iterations 10
 ```
 
+### Phase 4 (Part B) Completed: RDS & S3 Scanners
+
+Four new rules across two services, and the guardrail work that made room for them.
+
+*   **RDS, deliberately hands-off.** `rds_idle` infers from `DatabaseConnections` rather than CPU — a database nobody connects to is serving nobody, whereas a quiet CPU can still be a replica or a nightly-batch target. `rds_stopped` is state-based with no grace period: allocated storage bills at full rate while the engine is down, and AWS restarts a stopped instance automatically after 7 days, so "I stopped it" is never the fix it appears to be. Neither rule is actionable, gated twice over — both are in `NOTIFY_ONLY_RULES`, **and** `RDS_INSTANCE` has no `PLAYBOOK_ALLOWLIST` entry at all. Deleting a database, even with a final snapshot, is the largest irreversible action in this system's reach and is out of scope for v1.
+*   **S3, with two rules of deliberately different power.** `s3_incomplete_multipart` is exact and remediable: an abandoned multipart upload bills at full storage rate for parts that never became an object, and nothing in the console lists them. Its playbook deletes no object, because none was ever created. `s3_no_lifecycle` is advisory — a bucket without a policy is not *wholly* waste, so the finding reports a bounded fraction of its storage cost, with the fraction, the full cost and the raw size all in evidence so the estimate is auditable rather than magic.
+*   **The guardrail that made S3 safe.** Both S3 rules sit on the same `ResourceType`, and `PLAYBOOK_ALLOWLIST` is keyed by type — so without listing `s3_no_lifecycle` in `NOTIFY_ONLY_RULES`, approving "no lifecycle policy" would have run the abort playbook belonging to its sibling. That is the closest the type-keyed allowlist has come to breaking; the code now records when it has to become rule-keyed.
+*   **Scanner-level failure isolation.** `run_scan` already guaranteed one bad region could not end a scan. The same argument applied one level down and was missing: every scanner in a region shared one `try`, so the first to raise discarded all the others' findings. On a real account a single missing IAM grant would do this — and the result, no findings, is indistinguishable from a clean account. Scanners now fail independently, are reported in `ScanResult.scanners_failed`, audited, and printed by the CLI.
+
 ---
 
 ## Getting Started
@@ -264,7 +273,10 @@ docker compose exec app alembic upgrade head
 ```
 
 > [!IMPORTANT]
-> Run this *inside* the container, not on the host. The container stores findings at `/app/data/sentinel.db`, while a host-side `alembic upgrade head` targets `.sentinel.db` instead. Those are different files, and the mismatch is silent until every Slack **Approve** fails with *"cannot be approved"* — the server is looking up findings in a database the scan never wrote to. The same rule applies to scanning, which is why step 6 also runs in the container.
+> The container stores findings at `/app/data/sentinel.db`, and `docker-compose.yml` bind-mounts `./data` there, so with the shipped `SENTINEL_DB_PATH=data/sentinel.db` the host and the container are reading **one file**. Point them at different files and the mismatch is silent until every Slack **Approve** fails with *"cannot be approved"* — the server looking up findings in a database the scan never wrote to.
+
+> [!NOTE]
+> Upgrading an existing installation? Run this before your next scan. Phase 4B widened the `resources` CHECK constraint for the new RDS and S3 types, and a scan against an un-migrated database stops with an error naming this command — deliberately, since a half-written inventory would let the DELETED sweep disarm findings the failed pass never reached.
 
 ### 5. Seed the emulator
 
@@ -274,10 +286,15 @@ pip install -e ".[dev]"
 python scripts/seed_localstack.py
 ```
 
-This creates unattached EBS volumes (one tagged `finops:protected=true`), an orphaned Elastic IP, a stopped EC2 instance, orphaned snapshots, and an idle running instance with the flat CloudWatch metrics the `ec2_idle` rule needs.
+This creates unattached EBS volumes (one tagged `finops:protected=true`), an orphaned Elastic IP, a stopped EC2 instance, orphaned snapshots, an idle running instance with the flat CloudWatch metrics the `ec2_idle` rule needs, and four S3 buckets — one unmanaged and versioned, one with a lifecycle policy that must *not* be flagged, one protected by tag, and one holding an abandoned multipart upload.
+
+It creates no RDS instances: LocalStack's RDS support is Pro-tier, so a local scan reports both RDS scanners as failed instead. That is the expected output, not a misconfiguration — see [Known coverage gaps](#known-coverage-gaps).
 
 > [!NOTE]
-> The seeder is **not idempotent** — each run adds another full set of resources, so running it twice doubles your findings and your Slack messages. To start clean: `docker compose --profile dev down && rm -rf ./volume/* && docker compose --profile dev up -d`.
+> The EC2 and EBS seeding is **not idempotent** — each run adds another full set of volumes, addresses and instances, so running it twice doubles those findings and your Slack messages. The S3 section *is* re-runnable, since bucket names are fixed. To start clean: `docker compose --profile dev down && rm -rf ./volume/* && docker compose --profile dev up -d`.
+
+> [!TIP]
+> The seeded multipart upload is minutes old, so the default 7-day `S3_INCOMPLETE_MPU_AGE_DAYS` correctly ignores it. To see that finding, scan with `S3_INCOMPLETE_MPU_AGE_DAYS=0`.
 
 ### 6. Run a scan
 
@@ -287,27 +304,40 @@ docker compose exec app sentinel scan
 
 ```
 Starting FinOps Sentinel Scan...
-Loaded 5 scanners.
+Regions: us-east-1, eu-west-1, ap-southeast-2 (3)
+Loaded 8 scanners per region.
 Findings database: /app/data/sentinel.db
 
-Scan completed in 0.44s
-Inventory Discovered: 9 resources
-Findings Generated: 6 violations
-Notifications Sent: 5 (via slack)
+Scan completed in 3.15s
+Inventory Discovered: 39 resources
 
-                                 Optimization Opportunities
-┏━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━┓
-┃ Resource ID         ┃ Type         ┃ Rule           ┃ Savings ($/mo) ┃ Protected ┃ Status   ┃
-┡━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━┩
-│ vol-e3a10aefb156e43 │ ebs_volume   │ ebs_unattached │          $0.80 │    No     │ NOTIFIED │
-│ vol-f9a3921e37a2da1 │ ebs_volume   │ ebs_unattached │          $1.60 │    Yes    │ OPEN     │
-│ i-3f160ef23abcda2f2 │ ec2_instance │ ec2_idle       │         $70.08 │    No     │ NOTIFIED │
+6 scanner(s) failed — those resource types were not checked:
+  ! us-east-1/IdleRDSScanner, us-east-1/StoppedRDSScanner, …
+    ClientError: An error occurred (InternalFailure) when calling the…
+
+Findings Generated: 24 violations
+Notifications Sent: 15 (via slack)
+
+                         Optimization Opportunities
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━┓
+┃ Resource ID                ┃ Region         ┃ Rule             ┃     $/mo ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━┩
+│ 🔒 vol-66fbac19370d381b9   │ us-east-1      │ ebs_unattached   │    $1.60 │
+│ i-fb31312b10175f96b        │ us-east-1      │ ec2_idle         │   $70.08 │
+│ 🔒 finops-demo-protected-… │ us-east-1      │ s3_no_lifecycle  │    $3.68 │
+│ finops-demo-unmanaged-us-… │ us-east-1      │ s3_no_lifecycle  │    $3.68 │
+│ i-6bd1543d54e7c349c        │ eu-west-1      │ ec2_idle         │  $280.32 │
 ...
+└────────────────────────────┴────────────────┴──────────────────┴──────────┘
+🔒 protected by tag — reported, never notified, never remediated, and excluded
+from the totals below.
 ```
 
-The `Findings database:` line is printed deliberately — if it does not match the database your API server reads, approvals will fail.
+The `Findings database:` line is printed deliberately — if it does not match the database your API server reads, approvals will fail. With the shipped `.env` both resolve to `./data/sentinel.db`, which docker-compose bind-mounts into the container; keep them pointed at one file.
 
-Two behaviours worth noting in that table. The **protected** volume stays `OPEN` and is never notified. And findings only alert on the `OPEN → NOTIFIED` transition, so **re-running a scan against the same database sends no new Slack messages** — that is the design (re-scans must never resurrect decided findings), not a bug. For a fresh set of alerts, reset the database:
+`Inventory Discovered` counts what *this* scan saw in the cloud, not how many rows the database holds — resources seen by earlier scans and since deleted stay on file but are not counted here.
+
+Three behaviours worth noting in that table. Anything marked 🔒 is **protected by tag**: it stays `OPEN`, is never notified, and is excluded from the savings total. Findings only alert on the `OPEN → NOTIFIED` transition, so **re-running a scan against the same database sends no new Slack messages** — that is the design (re-scans must never resurrect decided findings), not a bug. And the failed-scanner block is not an error to fix locally: it is RDS being unavailable in free LocalStack, reported rather than hidden, because an empty result set otherwise reads exactly like a clean account. For a fresh set of alerts, reset the database:
 
 ```bash
 docker compose exec app sh -c 'rm -f /app/data/sentinel.db'
@@ -369,7 +399,7 @@ docker compose exec -e OLLAMA_BASE_URL=http://localhost:1 app sentinel scan
 
 ## Detection Rules
 
-Five scanners run on every pass. Each produces findings with a stable id of `rule|resource_id`, so a re-detected finding updates in place rather than duplicating.
+Eight scanners run on every pass, producing nine rules. Each finding has a stable id of `rule|resource_id`, so a re-detected finding updates in place rather than duplicating.
 
 | Rule | Flags | Cost basis | Remediation |
 |---|---|---|---|
@@ -378,10 +408,33 @@ Five scanners run on every pass. Each produces findings with a stable id of `rul
 | `ec2_stopped` | Instances stopped longer than `STOPPED_EC2_THRESHOLD_DAYS` | Sum of the instance's still-billing EBS volumes | `terminate_stopped_instance` |
 | `ebs_old_snapshot` | Snapshots older than `SNAPSHOT_AGE_THRESHOLD_DAYS`, **or** whose source volume is gone | Source volume size × snapshot rate | `delete_ebs_snapshot` |
 | `ec2_idle` | **Running** instances whose average CPU *and* network both stayed under threshold for the whole window | Instance type's hourly rate × 730 | **None — advisory only** |
+| `rds_idle` | **Available** databases whose average `DatabaseConnections` stayed at or below threshold for the whole window | Instance class × engine licence multiplier × 730, **plus** storage | **None — advisory only** |
+| `rds_stopped` | Databases in the `stopped` state, with no grace period | Allocated storage only — compute genuinely is not billed while stopped | **None — advisory only** |
+| `s3_no_lifecycle` | Buckets over `S3_MIN_BUCKET_SIZE_GB` with no lifecycle configuration | Storage cost × `S3_LIFECYCLE_ADDRESSABLE_FRACTION` | **None — advisory only** |
+| `s3_incomplete_multipart` | Multipart uploads abandoned longer than `S3_INCOMPLETE_MPU_AGE_DAYS` | Exact sum of the uploaded parts | `abort_incomplete_multipart_uploads` |
 
-Two guardrails apply to all of them. Anything tagged `finops:protected=true` is never notified and never actionable. And `ec2_idle` is listed in `NOTIFY_ONLY_RULES`, so the domain refuses to remediate it and Slack omits the buttons — low CPU is evidence, not proof, since a warm standby or a batch host between runs looks identical to an abandoned one.
+Two guardrails apply to all of them. Anything tagged `finops:protected=true` is never notified and never actionable. And every rule marked *advisory only* is listed in `NOTIFY_ONLY_RULES`, so the domain refuses to remediate it and Slack omits the buttons entirely rather than offering one the domain intends to reject.
+
+Rules land in `NOTIFY_ONLY_RULES` for two different reasons:
+
+*   **Inferred rather than observed.** `ec2_idle` and `rds_idle` read metrics, and low activity is evidence, not proof — a warm standby, a batch host between runs, or a failover target looks identical to an abandoned one. `s3_no_lifecycle` reports a *fraction* of a cost, which is not a number worth acting on automatically.
+*   **Too destructive for v1.** Both RDS rules are perfectly actionable — by a human. `RDS_INSTANCE` therefore has no `PLAYBOOK_ALLOWLIST` entry at all, so RDS is refused twice independently.
+
+That double gating is not belt-and-braces for its own sake. `PLAYBOOK_ALLOWLIST` is keyed by **resource type**, and S3 is where that nearly broke: `s3_incomplete_multipart` is remediable and `s3_no_lifecycle` is not, yet both sit on `S3_BUCKET`. Without the rule-level gate, approving "no lifecycle policy" would have aborted uploads. The mapping holds only while no two rules on one type need *different* playbooks; when that changes, it has to become rule-keyed.
 
 `ec2_stopped` findings record a `cost_basis` field in their evidence: `attached EBS volumes` when the real volumes were found in the scan inventory, or `assumed root volume` when they were not.
+
+### Where a scanner cannot see
+
+A scanner that fails is reported, never silently skipped. One unavailable service — a missing IAM grant, a region outage, an endpoint that does not implement the API — takes down only its own rules; every other scanner in that region still returns findings.
+
+```
+6 scanner(s) failed — those resource types were not checked:
+  ! us-east-1/IdleRDSScanner, us-east-1/StoppedRDSScanner, …
+    ClientError: An error occurred (InternalFailure) when calling the…
+```
+
+This exists because the failure mode it prevents is the most expensive one available: an empty result set reads exactly like a clean account. A region where *every* scanner fails is reported as a failed region instead, and is excluded from the DELETED sweep — otherwise a transient outage would mark that region's whole inventory as gone and disarm every finding it owns.
 
 ---
 
@@ -399,7 +452,7 @@ Every setting, its default, and what it does. All are environment variables, rea
 | `AWS_REGIONS` | *(empty)* | Regions to scan: comma-separated, or `all`. See [Multi-Region Scanning](#multi-region-scanning) |
 | `SCAN_MAX_WORKERS` | `8` | Regions scanned in parallel. `1` scans them one at a time |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | `test` | LocalStack dummies; replace or use an IAM role for real AWS |
-| `SENTINEL_DB_PATH` | `.sentinel.db` | SQLite file holding findings. The scan and the API server **must** share this |
+| `SENTINEL_DB_PATH` | `data/sentinel.db` | SQLite file holding findings. docker-compose bind-mounts `./data` and points the container at `/app/data/sentinel.db`, so the default resolves to the **same file** from host and container. The scan and the API server must share it, or every Slack approval fails |
 
 ### Notifications
 
@@ -418,6 +471,14 @@ Every setting, its default, and what it does. All are environment variables, rea
 | `EC2_IDLE_CPU_PERCENT` | `5.0` | Average CPU below this counts as idle |
 | `EC2_IDLE_NETWORK_BYTES` | `1000000` | Average network below this counts as idle |
 | `EC2_IDLE_MIN_DATAPOINTS` | `24` | Refuse to judge a shorter series — too little history reads as *unknown*, not *idle* |
+| `RDS_IDLE_OBSERVATION_DAYS` | `14` | CloudWatch window examined for database idleness |
+| `RDS_IDLE_MAX_CONNECTIONS` | `0.0` | Average `DatabaseConnections` at or below this counts as idle. Raise it if monitoring agents or connection poolers hold a permanent baseline open |
+| `RDS_IDLE_MIN_DATAPOINTS` | `24` | Refuse to judge a shorter series — never guess on a production database |
+| `S3_MIN_BUCKET_SIZE_GB` | `50` | Below this, a missing lifecycle policy is not worth an alert |
+| `S3_INCOMPLETE_MPU_AGE_DAYS` | `7` | Uploads older than this are abandoned rather than in flight. Used to detect them **and** re-checked when the abort playbook runs |
+| `S3_LIFECYCLE_ADDRESSABLE_FRACTION` | `0.20` | Share of a bucket's cost a lifecycle policy could plausibly recover |
+
+There is deliberately no `RDS_STOPPED_THRESHOLD_DAYS`. `DescribeDBInstances` exposes no stopped-since timestamp, so "stopped for N days" is not a question the API can answer — and since AWS restarts a stopped instance after 7 days anyway, the state itself is the finding.
 
 ### LLM advisor
 
@@ -494,6 +555,12 @@ All rates are **us-east-1 on-demand list prices**, which bounds how far the repo
 
 Unknown SKUs never return `$0`, because a zero-cost finding reads as "free" and disappears from the savings total. An unrecognised instance type falls back to a mid-range rate, and an unrecognised volume type to the priciest common one, so unknowns are never dismissed as harmless.
 
+Three rules price differently, and each says so in its evidence:
+
+*   **`rds_idle` reports compute *plus* storage**, since deleting the instance stops both meters. Compute is multiplied by an engine licence factor — SQL Server and Oracle cost multiples of PostgreSQL on identical hardware, and pricing them alike would bury the single most expensive finding in the report under cheaper ones.
+*   **`rds_stopped` reports storage only.** Compute genuinely is not billed while an instance is stopped; claiming otherwise would overstate the saving.
+*   **`s3_no_lifecycle` reports a fraction, not the bucket.** A bucket without a lifecycle policy is not wholly waste — only the cold part of it can ever be tiered or expired. The finding reports `S3_LIFECYCLE_ADDRESSABLE_FRACTION` of the storage cost, and puts the fraction, the full cost and the raw size in `evidence` so the estimate is auditable rather than magic. Reporting the whole bucket would let one large bucket dominate the total and make every number here untrustworthy.
+
 To move to real numbers, add a second adapter implementing the same port — against the [AWS Price List API](https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/price-changes.html) for list prices (free, needs caching) or Cost and Usage Reports for actuals (needs S3 and Athena) — and return it from `bootstrap.get_pricing()`. No scanner changes are required.
 
 ---
@@ -504,6 +571,10 @@ To move to real numbers, add a second adapter implementing the same port — aga
 |---|---|---|
 | Slack Approve/Deny says *"cannot be approved"* on every message | The scan and the API server used different databases | Run both in the container (steps 4 and 6). Check the `Findings database:` line in the scan output |
 | `OperationalError: no such table: resources` | Migrations never ran against this database | `docker compose exec app alembic upgrade head` |
+| *"The findings database does not allow resource type 's3_bucket'"* | Database predates Phase 4B's new resource types | `docker compose exec app alembic upgrade head` |
+| Every scan reports 6 failed RDS scanners | LocalStack's RDS support is Pro-tier | Expected locally — see [Known coverage gaps](#known-coverage-gaps). Nothing to fix |
+| No S3 findings at all, but the buckets exist | Scanning an image built before Phase 4B | `docker compose build app && docker compose up -d app`. Source is copied into the image, so a restart alone re-runs old code |
+| `s3_incomplete_multipart` never fires | The seeded upload is minutes old; the threshold is 7 days | Scan with `S3_INCOMPLETE_MPU_AGE_DAYS=0` |
 | Scan reports findings but sends no Slack messages | Findings already left `OPEN`; alerts fire once per finding | Reset the database (end of step 6) |
 | Twice as many findings as expected | `seed_localstack.py` ran more than once | Reset LocalStack (note in step 5) |
 | Slack buttons do nothing / show a dispatch error | No tunnel, so Slack cannot reach localhost | Start ngrok and set the Interactivity URL (step 7) |
@@ -551,13 +622,39 @@ mypy src                 # strict type checking
 lint-imports             # architecture: domain imports nothing external, dependencies point inward
 ```
 
+### Coverage gates
+
+Two, not one:
+
+```bash
+pytest tests/ --cov=src/finops_sentinel --cov-fail-under=90   # global
+coverage report --include='*/domain/*' --fail-under=95        # the domain layer
+```
+
+A single flat number would let `domain/` rot as long as the adapters compensated, which is backwards — the guardrails, the state machine and the approval logic all live there, and all of it is testable with in-memory fakes. The adapters spend their statements on boto3 and HTTP calls that are only coverable by mocking the client back at itself, so holding them to the same bar buys thin tests rather than real ones.
+
+`ports/` is deliberately excluded from the domain gate. Its abstract bodies are `...` under `# pragma: no cover`, leaving only imports and `def` lines that execute on import — it reports 100% without a single test, and would only pad the denominator.
+
+### Known coverage gaps
+
+Where the free emulator cannot exercise a feature, the gap is recorded rather than worked around with emulator-shaped production code.
+
+| Gap | Consequence | Covered instead by | Revisited |
+|---|---|---|---|
+| **LocalStack RDS is Pro-tier** | `rds_idle` and `rds_stopped` have no end-to-end test anywhere. The seed script creates no databases, and a local scan reports both scanners as failed | moto unit tests for all scanner logic; an integration test asserts the *degradation* path — that RDS failing does not cost the other scanners their findings | Phase 6, against a real account in read-only `DRY_RUN=true` mode |
+| **LocalStack publishes no `AWS/S3 BucketSizeBytes`** | `s3_no_lifecycle` would never fire locally, since bucket size is read from CloudWatch only | `scripts/seed_localstack.py` publishes synthetic datapoints, exactly as it already does for EC2 idle metrics — covered, not skipped | — |
+| **moto stamps multipart uploads with a fixed 2010 date** | Upload *age* cannot be varied against moto | The abort playbook's age re-check is tested by moving the threshold instead of the timestamp | — |
+
+One consequence is worth stating plainly: **S3 bucket size is queried with two CloudWatch dimensions** (`BucketName` *and* `StorageType`), because CloudWatch matches dimension sets exactly. Neither moto nor LocalStack publishes that metric, so neither would have caught a single-dimension query — it returns empty for an unrelated reason, and empty is also what "no data" legitimately looks like. That call is pinned by an explicit test rather than left to an end-to-end assertion that cannot exist.
+
 ---
 
 ## Roadmap
 *   ~~**Phase 2:** Introduce FastAPI endpoints, Human-In-The-Loop (HITL) manual Slack callbacks (via Block Kit buttons), and automated AWS playbooks.~~ (Completed)
 *   ~~**Phase 3:** Containerize applications using Docker and set up automated GitHub Actions CI/CD pipelines.~~ (Completed)
 *   ~~**Phase 4 (Part A):** Integrate the Ollama LLM-Advisor adapter for automated optimization descriptions, plus metric-based idle EC2 detection.~~ (Completed)
-*   **Phase 4 (Part B):** Metric-based `rds_idle` and `s3_lifecycle` scanners, an Alembic migration for the new resource types, and rolling z-score anomaly detection on daily estimated spend.
+*   ~~**Phase 4 (Part B1):** `rds_idle` / `rds_stopped` and the S3 lifecycle scanners, an Alembic migration for the new resource types, and per-scanner failure isolation.~~ (Completed)
+*   **Phase 4 (Part B2):** Right-sizing digest (14-day metric summaries → advisory-only, no buttons) and anomaly detection — a rolling z-score over daily estimated waste, computed deterministically in the domain with the Advisor only narrating it.
 *   **Phase 5:** Scaffold Kubernetes local orchestration via Helm charts.
 
 ---

@@ -231,7 +231,12 @@ def test_gateway_metric_averages_are_ordered_oldest_first(mock_aws_env):
         )
 
     gateway = Boto3Gateway(region="us-east-1")
-    averages = gateway.get_instance_metric_averages("i-metrics", "CPUUtilization", days=1)
+    averages = gateway.get_metric_averages(
+        namespace="AWS/EC2",
+        dimensions={"InstanceId": "i-metrics"},
+        metric_name="CPUUtilization",
+        days=1,
+    )
 
     assert averages == [1.0, 2.0, 3.0]
 
@@ -240,7 +245,40 @@ def test_gateway_metric_averages_empty_for_unknown_instance(mock_aws_env):
     """No data must read as 'unknown' (empty), never as 'idle' (zeros)."""
     gateway = Boto3Gateway(region="us-east-1")
 
-    assert gateway.get_instance_metric_averages("i-nothing", "CPUUtilization", days=14) == []
+    assert (
+        gateway.get_metric_averages(
+            namespace="AWS/EC2",
+            dimensions={"InstanceId": "i-nothing"},
+            metric_name="CPUUtilization",
+            days=14,
+        )
+        == []
+    )
+
+
+def test_gateway_metric_averages_reads_any_namespace(mock_aws_env):
+    """One method serves every service — the RDS/S3 scanners depend on this."""
+    import boto3
+
+    cloudwatch = boto3.client("cloudwatch", region_name="us-east-1")
+    cloudwatch.put_metric_data(
+        Namespace="AWS/RDS",
+        MetricData=[{
+            "MetricName": "DatabaseConnections",
+            "Dimensions": [{"Name": "DBInstanceIdentifier", "Value": "db-quiet"}],
+            "Timestamp": datetime.now(UTC) - timedelta(hours=2),
+            "Value": 0.0,
+        }],
+    )
+
+    gateway = Boto3Gateway(region="us-east-1")
+
+    assert gateway.get_metric_averages(
+        namespace="AWS/RDS",
+        dimensions={"DBInstanceIdentifier": "db-quiet"},
+        metric_name="DatabaseConnections",
+        days=1,
+    ) == [0.0]
 
 
 def _stopped_pair(instance_id, volume_ids):

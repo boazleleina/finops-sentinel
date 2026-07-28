@@ -34,16 +34,71 @@ class CloudGateway(ABC):
         ...  # pragma: no cover
 
     @abstractmethod
-    def get_instance_metric_averages(
-        self, instance_id: str, metric_name: str, days: int, period_seconds: int = 3600
+    def describe_rds_instances(self) -> list[dict[str, Any]]:
+        """Every RDS instance in the region, whatever its state.
+
+        Unlike EC2 there is no state-filtered sibling: DescribeDBInstances has
+        no server-side status filter, so callers filter on DBInstanceStatus
+        themselves. Returning every state also keeps the inventory complete —
+        an instance mid-backup must not vanish from the inventory and get swept
+        up as DELETED.
+        """
+        ...  # pragma: no cover
+
+    @abstractmethod
+    def describe_s3_buckets(self) -> list[dict[str, Any]]:
+        """Buckets homed in this gateway's region, with their configuration.
+
+        Bucket names are global but each bucket lives in one region, so the
+        adapter filters to its own — otherwise a multi-region scan would report
+        every bucket once per region.
+
+        Each entry carries the bucket's Name, CreationDate, Tags, LifecycleRules
+        (empty list when none is configured), and Versioning status, so a
+        scanner needs one call rather than four per bucket.
+        """
+        ...  # pragma: no cover
+
+    @abstractmethod
+    def get_incomplete_multipart_uploads(self, bucket: str) -> list[dict[str, Any]]:
+        """In-progress multipart uploads, with the byte size of their parts.
+
+        Orphaned uploads are invisible in the console and bill at full storage
+        rate forever: no object exists, so nothing lists them, but the parts
+        occupy space. Each entry carries Key, UploadId, Initiated, and SizeBytes.
+        """
+        ...  # pragma: no cover
+
+    @abstractmethod
+    def get_metric_averages(
+        self,
+        namespace: str,
+        dimensions: dict[str, str],
+        metric_name: str,
+        days: int,
+        period_seconds: int = 3600,
     ) -> list[float]:
         """
-        Per-period averages for one instance metric (e.g. "CPUUtilization",
-        "NetworkIn") over the trailing `days`, oldest first.
+        Per-period averages for one CloudWatch metric over the trailing `days`,
+        oldest first.
 
-        Returns an empty list when the provider has no data. Callers must
-        treat a short series as "unknown", not as "idle" — see
-        ec2_idle_min_datapoints.
+        Namespace and dimensions are caller-supplied so a single method serves
+        every service rather than growing one near-identical method per
+        resource kind:
+
+            AWS/EC2  {"InstanceId": "i-0abc..."}              CPUUtilization
+            AWS/RDS  {"DBInstanceIdentifier": "prod-db"}      DatabaseConnections
+            AWS/S3   {"BucketName": ..., "StorageType": ...}  BucketSizeBytes
+
+        `dimensions` is a map rather than a single name/value pair because
+        CloudWatch matches dimension sets EXACTLY: a metric published against
+        two dimensions is invisible to a query naming only one. S3 bucket size
+        is the case in point — querying it by BucketName alone returns nothing
+        at all against real AWS.
+
+        Returns an empty list when the provider has no data. Callers must treat
+        a short series as "unknown" rather than as a verdict — see the
+        *_min_datapoints settings.
         """
         ...  # pragma: no cover
 
