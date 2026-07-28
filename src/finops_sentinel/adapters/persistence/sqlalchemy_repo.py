@@ -2,6 +2,7 @@ import json
 from collections.abc import Collection
 from datetime import UTC, datetime
 from decimal import Decimal
+from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import (
@@ -59,6 +60,17 @@ class Base(DeclarativeBase):
     pass
 
 
+def _in_clause(column: str, values: type[StrEnum]) -> str:
+    """Render `column IN ('a', 'b', ...)` straight from a StrEnum.
+
+    Generated rather than hand-written so the constraint cannot drift from the
+    enum: adding a ResourceType now updates this automatically, and only the
+    Alembic migration has to be written by hand.
+    """
+    members = ", ".join(f"'{member.value}'" for member in values)
+    return f"{column} IN ({members})"
+
+
 class ResourceModel(Base):
     __tablename__ = "resources"
 
@@ -74,14 +86,9 @@ class ResourceModel(Base):
 
     __table_args__ = (
         CheckConstraint(
-            f"lifecycle IN ('{ResourceLifecycle.ACTIVE}', '{ResourceLifecycle.DELETED}')",
-            name="check_resource_lifecycle",
+            _in_clause("lifecycle", ResourceLifecycle), name="check_resource_lifecycle"
         ),
-        CheckConstraint(
-            f"resource_type IN ('{ResourceType.EBS_VOLUME}', '{ResourceType.ELASTIC_IP}', "
-            f"'{ResourceType.EC2_INSTANCE}', '{ResourceType.EBS_SNAPSHOT}')",
-            name="check_resource_type",
-        ),
+        CheckConstraint(_in_clause("resource_type", ResourceType), name="check_resource_type"),
     )
 
 
@@ -101,13 +108,7 @@ class FindingModel(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
-        CheckConstraint(
-            f"status IN ('{FindingStatus.OPEN}', '{FindingStatus.NOTIFIED}', "
-            f"'{FindingStatus.APPROVED}', '{FindingStatus.DENIED}', "
-            f"'{FindingStatus.REMEDIATED}', '{FindingStatus.FAILED}', "
-            f"'{FindingStatus.EXPIRED}')",
-            name="check_finding_status",
-        ),
+        CheckConstraint(_in_clause("status", FindingStatus), name="check_finding_status"),
     )
 
 
