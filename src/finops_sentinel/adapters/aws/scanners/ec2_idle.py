@@ -61,8 +61,7 @@ class IdleEC2Scanner(Scanner):
             self._metrics[instance_id] = {
                 metric: gateway.get_metric_averages(
                     namespace="AWS/EC2",
-                    dimension_name="InstanceId",
-                    dimension_value=instance_id,
+                    dimensions={"InstanceId": instance_id},
                     metric_name=metric,
                     days=self.observation_days,
                 )

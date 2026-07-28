@@ -233,8 +233,7 @@ def test_gateway_metric_averages_are_ordered_oldest_first(mock_aws_env):
     gateway = Boto3Gateway(region="us-east-1")
     averages = gateway.get_metric_averages(
         namespace="AWS/EC2",
-        dimension_name="InstanceId",
-        dimension_value="i-metrics",
+        dimensions={"InstanceId": "i-metrics"},
         metric_name="CPUUtilization",
         days=1,
     )
@@ -249,8 +248,7 @@ def test_gateway_metric_averages_empty_for_unknown_instance(mock_aws_env):
     assert (
         gateway.get_metric_averages(
             namespace="AWS/EC2",
-            dimension_name="InstanceId",
-            dimension_value="i-nothing",
+            dimensions={"InstanceId": "i-nothing"},
             metric_name="CPUUtilization",
             days=14,
         )
@@ -277,8 +275,7 @@ def test_gateway_metric_averages_reads_any_namespace(mock_aws_env):
 
     assert gateway.get_metric_averages(
         namespace="AWS/RDS",
-        dimension_name="DBInstanceIdentifier",
-        dimension_value="db-quiet",
+        dimensions={"DBInstanceIdentifier": "db-quiet"},
         metric_name="DatabaseConnections",
         days=1,
     ) == [0.0]

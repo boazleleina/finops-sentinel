@@ -41,14 +41,14 @@ class FakeGatewayBase(CloudGateway):
     def describe_rds_instances(self):  # pragma: no cover
         raise AssertionError("describe_rds_instances not stubbed for this test")
 
+    def describe_s3_buckets(self):  # pragma: no cover
+        raise AssertionError("describe_s3_buckets not stubbed for this test")
+
+    def get_incomplete_multipart_uploads(self, bucket):  # pragma: no cover
+        raise AssertionError("get_incomplete_multipart_uploads not stubbed for this test")
+
     def get_metric_averages(
-        self,
-        namespace,
-        dimension_name,
-        dimension_value,
-        metric_name,
-        days,
-        period_seconds=3600,
+        self, namespace, dimensions, metric_name, days, period_seconds=3600
     ):  # pragma: no cover
         raise AssertionError("get_metric_averages not stubbed for this test")
 

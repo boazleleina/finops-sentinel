@@ -50,11 +50,10 @@ class FakeRDSGateway(FakeGatewayBase):
         return self.instances
 
     def get_metric_averages(
-        self, namespace, dimension_name, dimension_value, metric_name, days,
-        period_seconds=3600,
+        self, namespace, dimensions, metric_name, days, period_seconds=3600
     ):
-        self.metric_calls.append((namespace, dimension_name, dimension_value, metric_name))
-        return self.connections.get(dimension_value, [])
+        self.metric_calls.append((namespace, dimensions, metric_name))
+        return self.connections.get(dimensions["DBInstanceIdentifier"], [])
 
 
 def _instance(identifier, *, status="available", db_class="db.m5.large",
@@ -162,7 +161,7 @@ def test_idle_scanner_reads_the_rds_namespace():
     IdleRDSScanner(region="us-east-1", pricing=StaticPricing()).discover(gateway)
 
     assert gateway.metric_calls == [
-        ("AWS/RDS", "DBInstanceIdentifier", "db-quiet", "DatabaseConnections")
+        ("AWS/RDS", {"DBInstanceIdentifier": "db-quiet"}, "DatabaseConnections")
     ]
 
 

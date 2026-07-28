@@ -106,8 +106,7 @@ class IdleRDSScanner(Scanner):
             if instance.get("DBInstanceStatus") == AVAILABLE:
                 self._connections[identifier] = gateway.get_metric_averages(
                     namespace=RDS_NAMESPACE,
-                    dimension_name=RDS_DIMENSION,
-                    dimension_value=identifier,
+                    dimensions={RDS_DIMENSION: identifier},
                     metric_name="DatabaseConnections",
                     days=self.observation_days,
                 )

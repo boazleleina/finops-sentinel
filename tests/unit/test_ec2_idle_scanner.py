@@ -20,16 +20,11 @@ class FakeMetricsGateway(FakeGatewayBase):
         return self.instances
 
     def get_metric_averages(
-        self,
-        namespace,
-        dimension_name,
-        dimension_value,
-        metric_name,
-        days,
-        period_seconds=3600,
+        self, namespace, dimensions, metric_name, days, period_seconds=3600
     ):
-        self.metric_calls.append((namespace, dimension_value, metric_name, days))
-        return self.metrics.get(dimension_value, {}).get(metric_name, [])
+        instance_id = dimensions["InstanceId"]
+        self.metric_calls.append((namespace, instance_id, metric_name, days))
+        return self.metrics.get(instance_id, {}).get(metric_name, [])
 
 
 def _instance(instance_id, instance_type="m5.large", tags=None):

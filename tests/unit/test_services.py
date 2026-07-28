@@ -67,8 +67,7 @@ class FakeCloudGateway(FakeGatewayBase):
     def describe_running_ec2_instances(self): return []
 
     def get_metric_averages(
-        self, namespace, dimension_name, dimension_value, metric_name, days,
-        period_seconds=3600,
+        self, namespace, dimensions, metric_name, days, period_seconds=3600
     ):
         return []
 
