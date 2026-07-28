@@ -4,9 +4,7 @@ from decimal import Decimal
 import pytest
 
 from finops_sentinel.domain.models import (
-    Finding,
     FindingStatus,
-    Resource,
     ResourceLifecycle,
     ResourceType,
 )
@@ -21,27 +19,7 @@ from finops_sentinel.domain.services import (
 from finops_sentinel.ports.advisor import Advisor
 from finops_sentinel.ports.notifier import Notifier
 from finops_sentinel.ports.scanner import Scanner
-from tests.conftest import FakeGatewayBase
-
-
-def make_resource(res_id="res-mock", resource_id="vol-123",
-                  resource_type=ResourceType.EBS_VOLUME, tags=None):
-    now = datetime.now(UTC)
-    return Resource(
-        id=res_id, resource_id=resource_id, resource_type=resource_type,
-        resource_arn="arn", region="us-east-1", current_tags=tags or {},
-        lifecycle=ResourceLifecycle.ACTIVE, first_seen_at=now, last_seen_at=now
-    )
-
-
-def make_finding(finding_id="f-mock", status=FindingStatus.NOTIFIED,
-                 resource_ref="res-mock", protected=False, rule="ebs"):
-    now = datetime.now(UTC)
-    return Finding(
-        id=finding_id, resource_ref=resource_ref, rule=rule, evidence={},
-        tags_at_detection={}, est_monthly_cost_usd=Decimal("1.00"),
-        status=status, protected=protected, detected_at=now, last_seen_at=now
-    )
+from tests.fakes import FakeCloudGateway, make_finding, make_resource, resolver
 
 
 class MockScanner(Scanner):
@@ -51,36 +29,6 @@ class MockScanner(Scanner):
     def evaluate(self, discover_results):
         res = discover_results[0][0]
         return [make_finding(status=FindingStatus.OPEN, resource_ref=res.id)]
-
-
-class FakeCloudGateway(FakeGatewayBase):
-    """In-memory gateway: records executed playbooks, can be told to fail."""
-
-    def __init__(self, fail=False):
-        self.executed = []
-        self.fail = fail
-
-    def describe_ebs_volumes(self): return []
-    def describe_elastic_ips(self): return []
-    def describe_ec2_instances(self): return []
-    def describe_ebs_snapshots(self): return []
-    def describe_running_ec2_instances(self): return []
-
-    def get_metric_averages(
-        self, namespace, dimensions, metric_name, days, period_seconds=3600
-    ):
-        return []
-
-    def execute(self, playbook, resource_id, dry_run):
-        if self.fail:
-            raise RuntimeError("cloud exploded")
-        self.executed.append((playbook, resource_id, dry_run))
-        return {"snapshot_id": f"snap-{resource_id}"} if not dry_run else {"dry_run": True}
-
-
-def resolver(gateway):
-    """approve_finding takes a region -> gateway resolver, not a gateway."""
-    return lambda _region: gateway
 
 
 class FakeNotifier(Notifier):

@@ -23,7 +23,7 @@ from finops_sentinel.domain.models import (
 )
 from finops_sentinel.domain.services import ScanTarget, approve_finding, run_scan
 from finops_sentinel.ports.scanner import Scanner
-from tests.conftest import FakeGatewayBase
+from tests.fakes import FakeGatewayBase
 
 
 def make_resource(resource_id, region, resource_type=ResourceType.EBS_VOLUME, seen=None):

@@ -18,7 +18,13 @@ from finops_sentinel.adapters.aws.scanners.s3 import BYTES_PER_GB, S3LifecycleSc
 from finops_sentinel.domain.models import FindingStatus, ResourceType
 from finops_sentinel.domain.rules import PLAYBOOK_ALLOWLIST, is_remediable
 from finops_sentinel.domain.services import approve_finding
-from tests.conftest import FakeGatewayBase
+from tests.fakes import (
+    FakeCloudGateway,
+    FakeGatewayBase,
+    make_finding,
+    make_resource,
+    resolver,
+)
 
 NOW = datetime.now(UTC)
 
@@ -258,13 +264,6 @@ def test_lifecycle_finding_cannot_borrow_its_siblings_playbook(repository):
     Both rules sit on S3_BUCKET, and the allowlist is keyed by type, so without
     the rule-level gate approving "no lifecycle policy" would abort uploads.
     """
-    from tests.unit.test_services import (
-        FakeCloudGateway,
-        make_finding,
-        make_resource,
-        resolver,
-    )
-
     repository.upsert_resource(
         make_resource(resource_id="data-lake", resource_type=ResourceType.S3_BUCKET)
     )
@@ -285,13 +284,6 @@ def test_lifecycle_finding_cannot_borrow_its_siblings_playbook(repository):
 
 
 def test_multipart_finding_is_approvable(repository):
-    from tests.unit.test_services import (
-        FakeCloudGateway,
-        make_finding,
-        make_resource,
-        resolver,
-    )
-
     repository.upsert_resource(
         make_resource(resource_id="uploads", resource_type=ResourceType.S3_BUCKET)
     )

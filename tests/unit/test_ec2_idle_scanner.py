@@ -5,7 +5,7 @@ from decimal import Decimal
 from finops_sentinel.adapters.aws.pricing import StaticPricing
 from finops_sentinel.adapters.aws.scanners.ec2_idle import IdleEC2Scanner
 from finops_sentinel.domain.models import Resource, ResourceLifecycle, ResourceType
-from tests.conftest import FakeGatewayBase
+from tests.fakes import FakeGatewayBase
 
 
 class FakeMetricsGateway(FakeGatewayBase):

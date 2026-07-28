@@ -17,7 +17,13 @@ from finops_sentinel.adapters.aws.scanners.rds import IdleRDSScanner, StoppedRDS
 from finops_sentinel.domain.models import FindingStatus, ResourceType
 from finops_sentinel.domain.rules import PLAYBOOK_ALLOWLIST, is_remediable
 from finops_sentinel.domain.services import approve_finding
-from tests.conftest import FakeGatewayBase
+from tests.fakes import (
+    FakeCloudGateway,
+    FakeGatewayBase,
+    make_finding,
+    make_resource,
+    resolver,
+)
 
 
 @pytest.fixture
@@ -263,13 +269,6 @@ def test_rds_has_no_playbook_at_all():
 @pytest.mark.parametrize("rule", ["rds_idle", "rds_stopped"])
 def test_approving_an_rds_finding_is_refused(repository, rule):
     """The whole point of the phase: this system does not delete databases."""
-    from tests.unit.test_services import (
-        FakeCloudGateway,
-        make_finding,
-        make_resource,
-        resolver,
-    )
-
     repository.upsert_resource(
         make_resource(resource_id="db-quiet", resource_type=ResourceType.RDS_INSTANCE)
     )
