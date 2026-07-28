@@ -57,6 +57,33 @@ def localstack_env(tmp_path):
     repo.engine.dispose()
 
 
+def test_rds_scanners_degrade_without_taking_the_scan_down(localstack_env):
+    """The documented RDS coverage gap, asserted rather than assumed.
+
+    LocalStack's RDS support is Pro-tier, so DescribeDBInstances fails here the
+    same way it would against an account whose IAM policy omits it. That makes
+    this the live proof of per-scanner isolation: the RDS scanners are reported
+    as failed, and every other scanner still returns its findings.
+
+    The RDS scanners themselves have no end-to-end coverage anywhere — moto
+    unit tests are the whole safety net for their logic. Revisited in Phase 6
+    against a real account in read-only DRY_RUN mode.
+    """
+    repo, _ = localstack_env
+
+    result = run_scan(get_scan_targets(), repo)
+
+    failed = set(result.scanners_failed)
+    assert "us-east-1/IdleRDSScanner" in failed
+    assert "us-east-1/StoppedRDSScanner" in failed
+    # The point of the isolation: the region still scanned.
+    assert result.regions_scanned == ["us-east-1"]
+    assert result.regions_failed == {}
+    assert any(
+        e.event == "scanner_failed" for e in repo.get_audit_events()
+    )
+
+
 def test_full_loop_scan_approve_deleted_audited(localstack_env):
     repo, ec2 = localstack_env
 

@@ -313,6 +313,108 @@ def test_approve_still_works_for_state_based_ec2_rule(repository):
     assert gateway.executed == [("terminate_stopped_instance", "vol-123", False)]
 
 
+class ExplodingScanner(Scanner):
+    """A scanner whose service is unreachable — no grant, or no such service."""
+
+    def __init__(self, error="AccessDenied: rds:DescribeDBInstances"):
+        self.error = error
+        self.evaluated = False
+
+    def discover(self, gateway):
+        raise RuntimeError(self.error)
+
+    def evaluate(self, discover_results):  # pragma: no cover - must never run
+        self.evaluated = True
+        return []
+
+
+def test_one_failing_scanner_does_not_blind_the_others(repository):
+    """A missing IAM grant on one service must not cost every other finding.
+
+    Without per-scanner isolation this is a total loss of visibility that looks
+    identical to a clean account — the most expensive failure this tool has.
+    """
+    exploding = ExplodingScanner()
+    result = run_scan(
+        [ScanTarget("us-east-1", None, [MockScanner(), exploding])], repository
+    )
+
+    assert len(result.findings) == 1
+    assert result.regions_scanned == ["us-east-1"]
+    assert result.regions_failed == {}
+    assert "us-east-1/ExplodingScanner" in result.scanners_failed
+    assert "AccessDenied" in result.scanners_failed["us-east-1/ExplodingScanner"]
+    assert any(e.event == "scanner_failed" for e in repository.get_audit_events())
+
+
+def test_a_failed_scanner_is_not_evaluated(repository):
+    """discover() raising can leave half-built state behind.
+
+    The idle scanners cache metric series between discover and evaluate, so
+    evaluating one that failed mid-discovery would judge instances on a partial
+    series — exactly the false positive min_datapoints exists to prevent.
+    """
+    exploding = ExplodingScanner()
+    run_scan([ScanTarget("us-east-1", None, [MockScanner(), exploding])], repository)
+
+    assert exploding.evaluated is False
+
+
+def test_region_where_every_scanner_fails_counts_as_a_failed_region(repository):
+    """Blind is not clean: the DELETED sweep must skip that region.
+
+    Otherwise a total outage in one region marks its whole inventory DELETED,
+    and approve_finding then refuses every finding that region owns.
+
+    Reported as a failed REGION, not as N failed scanners: nothing came back at
+    all, so there is no partial inventory to reason about.
+    """
+    result = run_scan(
+        [
+            ScanTarget("us-east-1", None, [MockScanner()]),
+            ScanTarget("eu-west-1", None, [ExplodingScanner(), ExplodingScanner()]),
+        ],
+        repository,
+    )
+
+    assert len(result.findings) == 1
+    assert result.regions_scanned == ["us-east-1"]
+    assert "eu-west-1" in result.regions_failed
+    # Both instances of the same scanner class are counted, or the region would
+    # look partially healthy and get swept.
+    assert result.regions_failed["eu-west-1"].count("ExplodingScanner") == 2
+    assert result.scanners_failed == {}
+
+
+def test_every_region_failing_is_still_fatal(repository):
+    """No findings from a total blackout must never read as a clean account."""
+    with pytest.raises(RuntimeError, match="Every region failed"):
+        run_scan(
+            [ScanTarget("us-east-1", None, [ExplodingScanner()])], repository
+        )
+
+
+def test_partial_scanner_failure_still_sweeps_the_region(repository):
+    """A region that mostly worked is still swept, so real deletions register."""
+    run_scan([ScanTarget("us-east-1", None, [MockScanner()])], repository)
+    assert repository.get_all_resources()[0].lifecycle == ResourceLifecycle.ACTIVE
+
+    # Next scan: the resource is gone from the cloud, one scanner is broken.
+    class EmptyScanner(Scanner):
+        def discover(self, gateway):
+            return []
+
+        def evaluate(self, discover_results):
+            return []
+
+    run_scan(
+        [ScanTarget("us-east-1", None, [EmptyScanner(), ExplodingScanner()])],
+        repository,
+    )
+
+    assert repository.get_all_resources()[0].lifecycle == ResourceLifecycle.DELETED
+
+
 # --------------------------------------------------------------------------
 # Guardrail and concurrency branches
 #

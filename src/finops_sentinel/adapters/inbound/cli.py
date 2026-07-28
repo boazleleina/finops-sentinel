@@ -71,6 +71,18 @@ def scan() -> None:
             console.print(f"  [red]✗[/red] {region}: {error}")
         console.print()
 
+    if result.scanners_failed:
+        # Same reasoning one level down: these regions scanned, but with a blind
+        # spot. Saying so beats reporting "no RDS waste" for an account whose
+        # RDS calls never went through.
+        console.print(
+            f"\n[bold yellow]{len(result.scanners_failed)} scanner(s) failed — "
+            "those resource types were not checked:[/bold yellow]"
+        )
+        for scanner, error in sorted(result.scanners_failed.items()):
+            console.print(f"  [yellow]![/yellow] {scanner}: {error}")
+        console.print()
+
     if not findings:
         if result.regions_failed:
             console.print(
