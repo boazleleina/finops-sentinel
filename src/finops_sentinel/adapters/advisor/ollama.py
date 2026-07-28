@@ -13,16 +13,22 @@ decisions — approve/deny buttons carry finding ids, not model output.
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, TypeVar
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError
 
 from finops_sentinel.domain.models import Finding, Resource
-from finops_sentinel.domain.summaries import render_template_summary
+from finops_sentinel.domain.summaries import (
+    render_template_narration,
+    render_template_summary,
+)
 from finops_sentinel.ports.advisor import Advisor
 
 logger = logging.getLogger(__name__)
+
+# Every prompt shape validates against its own strict schema.
+_ResponseT = TypeVar("_ResponseT", bound=BaseModel)
 
 # Reasoning models (qwen3) may still wrap output in think tags even with
 # thinking disabled; strip them before parsing.
@@ -74,12 +80,32 @@ _SYSTEM_PROMPT = (
 )
 
 
+_NARRATION_SYSTEM_PROMPT = (
+    "You are a FinOps advisor for an AWS cost-optimization agent. You will be "
+    "given a topic and a set of facts that have ALREADY been computed.\n"
+    "Rules:\n"
+    "- Restate and interpret the given facts in two or three sentences. Never "
+    "recompute, contradict, round differently, or add a number that is not in "
+    "the facts.\n"
+    "- Never claim an action was taken or recommend one be automated. This is "
+    "an advisory digest; a human decides everything.\n"
+    "- Plain prose for an on-call engineer skimming a Slack message.\n"
+    "- Respond with JSON only."
+)
+
+
 class AdvisorResponse(BaseModel):
     """Strict schema for the model's reply. Anything else is a failure."""
 
     summary: str = Field(min_length=1, max_length=600)
     risk: str = Field(pattern="^(low|medium|high)$")
     recommended_action: str = Field(min_length=1, max_length=300)
+
+
+class NarrationResponse(BaseModel):
+    """Strict schema for a digest narration. No risk verdict — nothing to act on."""
+
+    narrative: str = Field(min_length=1, max_length=800)
 
 
 class OllamaAdvisor(Advisor):
@@ -116,6 +142,33 @@ class OllamaAdvisor(Advisor):
 
         return f"{parsed.summary} (risk: {parsed.risk}) Next step: {parsed.recommended_action}"
 
+    def narrate(self, topic: str, facts: dict[str, Any]) -> str:
+        """Narrate pre-computed facts, falling back to the domain template.
+
+        Same never-raise contract as summarize. The facts were derived
+        deterministically in the domain, so a failure here costs prose and
+        nothing else — the digest still carries the same numbers.
+        """
+        fallback = render_template_narration(topic, facts)
+        prompt = (
+            f"Topic: {topic}\nFacts:\n{json.dumps(facts, default=str, indent=2)}"
+        )
+        try:
+            parsed = self._request(
+                prompt,
+                system_prompt=_NARRATION_SYSTEM_PROMPT,
+                schema=NarrationResponse,
+            )
+        except (httpx.HTTPError, json.JSONDecodeError, ValidationError, KeyError) as exc:
+            logger.warning(
+                "Ollama narration failed for topic %s (%s: %s); using template",
+                topic,
+                type(exc).__name__,
+                exc,
+            )
+            return fallback
+        return parsed.narrative
+
     def advise(self, finding: Finding, resource: Resource) -> AdvisorResponse:
         """Strict path: return the validated model response or raise.
 
@@ -123,7 +176,11 @@ class OllamaAdvisor(Advisor):
         exists so `sentinel smoke-llm` can tell a real success apart from a
         silent fallback — through summarize() the two are indistinguishable.
         """
-        return self._request(self._build_prompt(finding, resource))
+        return self._request(
+            self._build_prompt(finding, resource),
+            system_prompt=_SYSTEM_PROMPT,
+            schema=AdvisorResponse,
+        )
 
     def _build_prompt(self, finding: Finding, resource: Resource) -> str:
         evidence = {
@@ -142,14 +199,22 @@ class OllamaAdvisor(Advisor):
         }
         return f"Finding:\n{json.dumps(payload, default=str, indent=2)}"
 
-    def _request(self, prompt: str) -> AdvisorResponse:
+    def _request(
+        self, prompt: str, system_prompt: str, schema: type[_ResponseT]
+    ) -> _ResponseT:
+        """One HTTP path for every prompt shape.
+
+        The schema is handed to Ollama's structured-output `format` field AND
+        used to validate the reply, so a model that ignores the constraint is
+        caught rather than trusted.
+        """
         body: dict[str, Any] = {
             "model": self.model,
             "stream": False,
-            "format": AdvisorResponse.model_json_schema(),
+            "format": schema.model_json_schema(),
             "options": {"temperature": 0},
             "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
             ],
         }
@@ -166,4 +231,4 @@ class OllamaAdvisor(Advisor):
             response.raise_for_status()
             content = response.json()["message"]["content"]
 
-        return AdvisorResponse.model_validate_json(_THINK_BLOCK_RE.sub("", content).strip())
+        return schema.model_validate_json(_THINK_BLOCK_RE.sub("", content).strip())

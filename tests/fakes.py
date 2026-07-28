@@ -20,7 +20,9 @@ from finops_sentinel.domain.models import (
     ResourceLifecycle,
     ResourceType,
 )
+from finops_sentinel.ports.advisor import Advisor
 from finops_sentinel.ports.cloud import CloudGateway
+from finops_sentinel.ports.notifier import Notifier
 
 
 def make_resource(
@@ -135,3 +137,45 @@ class FakeCloudGateway(FakeGatewayBase):
 def resolver(gateway):
     """approve_finding takes a region -> gateway resolver, not a gateway."""
     return lambda _region: gateway
+
+
+class FakeNotifier(Notifier):
+    """Records what was sent. Zero Slack, zero HTTP."""
+
+    def __init__(self):
+        self.alerts: list[tuple[str, str]] = []
+        self.digests: list[tuple[str, list[str]]] = []
+
+    @property
+    def channel_name(self):
+        return "fake"
+
+    def send_finding_alert(self, finding, resource):
+        self.alerts.append((finding.id, resource.resource_id))
+        return f"msg-{len(self.alerts)}"
+
+    def send_digest(self, title, sections):
+        self.digests.append((title, sections))
+        return f"digest-{len(self.digests)}"
+
+    def parse_callback(self, raw_body, headers):
+        raise ValueError("not supported")
+
+    def confirm_decision(self, reply_context, text):
+        pass
+
+
+class FakeAdvisor(Advisor):
+    """Records what it was asked, returns deterministic prose."""
+
+    def __init__(self):
+        self.calls: list[str] = []
+        self.narrations: list[tuple[str, dict[str, Any]]] = []
+
+    def summarize(self, finding, resource):
+        self.calls.append(finding.id)
+        return f"advice for {finding.rule} on {resource.resource_id}"
+
+    def narrate(self, topic, facts):
+        self.narrations.append((topic, facts))
+        return f"narrated {topic}"
