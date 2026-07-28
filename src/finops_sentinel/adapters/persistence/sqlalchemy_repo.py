@@ -15,6 +15,7 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy.engine import Dialect
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from finops_sentinel.domain.models import (
@@ -188,10 +189,27 @@ def _to_finding(db_f: FindingModel) -> Finding:
 
 class SqlAlchemyRepository(FindingsRepository):
     def __init__(self, db_url: str):
+        self.db_url = db_url
         self.engine = create_engine(db_url, echo=False)
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
 
     def upsert_resource(self, resource: Resource) -> None:
+        try:
+            self._upsert_resource(resource)
+        except IntegrityError as exc:
+            if "check_resource_type" not in str(exc):
+                raise
+            # The database predates this resource type. Failing hard is right —
+            # a half-written inventory is worse than a stopped scan — but the
+            # raw CHECK-constraint traceback tells nobody what to do about it.
+            raise RuntimeError(
+                f"The findings database does not allow resource type "
+                f"'{resource.resource_type}'. It was created by an older "
+                f"version of FinOps Sentinel. Run `alembic upgrade head` "
+                f"against {self.db_url} and scan again."
+            ) from exc
+
+    def _upsert_resource(self, resource: Resource) -> None:
         db = self.SessionLocal()
         try:
             db_res = (
