@@ -79,6 +79,17 @@ class Settings(BaseSettings):
     # no stopped-since timestamp, and AWS auto-restarts a stopped instance
     # after 7 days anyway, so the state itself is the finding.
 
+    # S3. Below this size a missing lifecycle policy is not worth an alert —
+    # the policy costs more argument than the storage does money.
+    s3_min_bucket_size_gb: float = 50.0
+    # Multipart uploads older than this are abandoned, not in flight. Used both
+    # to detect and, re-checked, to decide what the abort playbook may touch.
+    s3_incomplete_mpu_age_days: int = 7
+    # Share of a bucket's storage cost a lifecycle policy could plausibly
+    # recover. A bucket without a policy is NOT wholly waste, and reporting its
+    # full cost as savings would let one large bucket dominate the total.
+    s3_lifecycle_addressable_fraction: float = 0.20
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
     @property

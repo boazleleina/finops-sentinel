@@ -43,6 +43,19 @@ _RULE_COPY: dict[str, str] = {
         "replica, a failover target, or a restore staging point, then snapshot "
         "and delete it yourself."
     ),
+    "s3_no_lifecycle": (
+        "This bucket has no lifecycle policy, so nothing ever transitions to "
+        "cheaper storage or expires — objects and old versions bill at full "
+        "rate indefinitely. The cost shown is a fraction of the bucket's total, "
+        "since only some of it will be cold enough to tier. Add a lifecycle "
+        "policy; this agent will not delete your objects."
+    ),
+    "s3_incomplete_multipart": (
+        "Multipart uploads in this bucket were abandoned part-way and are "
+        "billing for the parts already stored. No object was ever created, so "
+        "nothing in the console shows them and nothing depends on them. "
+        "Aborting the uploads reclaims the space without deleting any object."
+    ),
     "rds_stopped": (
         "This database is stopped, which is not the saving it looks like — "
         "allocated storage bills at the full rate while the engine is down, and "

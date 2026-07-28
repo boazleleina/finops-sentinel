@@ -14,11 +14,22 @@ PROTECTED_TAG_KEY = "finops:protected"
 # The only remediations the system is allowed to execute, keyed by resource
 # type. Adding a new remediable type requires an explicit entry here plus a
 # playbook implementation in the cloud gateway.
+#
+# Keyed by resource type, which holds only because no two rules on the same
+# type need DIFFERENT playbooks. S3 is the closest this has come to breaking:
+# s3_incomplete_multipart is remediable and s3_no_lifecycle is not, and both sit
+# on S3_BUCKET. NOTIFY_ONLY_RULES covers that case. If a second remediable rule
+# ever lands on an existing type, this mapping has to become rule-keyed.
+#
+# RDS is absent on purpose — see NOTIFY_ONLY_RULES below.
 PLAYBOOK_ALLOWLIST: dict[ResourceType, str] = {
     ResourceType.EBS_VOLUME: "snapshot_then_delete_volume",
     ResourceType.ELASTIC_IP: "release_eip",
     ResourceType.EC2_INSTANCE: "terminate_stopped_instance",
     ResourceType.EBS_SNAPSHOT: "delete_ebs_snapshot",
+    # Deletes no object: an incomplete upload never became one. It discards
+    # orphaned parts that bill at full storage rate and that nothing lists.
+    ResourceType.S3_BUCKET: "abort_incomplete_multipart_uploads",
 }
 
 # Rules the system reports but will never act on. Two reasons land a rule here.
@@ -35,7 +46,14 @@ PLAYBOOK_ALLOWLIST: dict[ResourceType, str] = {
 # here as well is belt and braces: the allowlist gate alone would refuse them,
 # but only after Slack had already offered an Approve button the domain
 # intends to reject.
-NOTIFY_ONLY_RULES: frozenset[str] = frozenset({"ec2_idle", "rds_idle", "rds_stopped"})
+# Not measurable enough to act on: s3_no_lifecycle reports a bounded FRACTION
+# of a bucket's cost, because a bucket without a policy is not wholly waste.
+# Its resource type does carry a playbook — the one belonging to its sibling
+# rule s3_incomplete_multipart — so without this entry the type-keyed allowlist
+# would offer to abort uploads in answer to a missing lifecycle policy.
+NOTIFY_ONLY_RULES: frozenset[str] = frozenset(
+    {"ec2_idle", "rds_idle", "rds_stopped", "s3_no_lifecycle"}
+)
 
 
 def is_remediable(rule: str) -> bool:

@@ -59,6 +59,16 @@ class Pricing(ABC):
         ...  # pragma: no cover
 
     @abstractmethod
+    def s3_storage_monthly(self, size_gb: float, storage_class: str, region: str) -> Decimal:
+        """Monthly cost of objects held in a bucket at the given storage class.
+
+        Takes a float because bucket sizes come from CloudWatch in bytes and
+        rarely land on whole gigabytes; rounding to int first would price a
+        700MB bucket at zero, which the port forbids.
+        """
+        ...  # pragma: no cover
+
+    @abstractmethod
     def rds_storage_monthly(self, size_gb: int, storage_type: str, region: str) -> Decimal:
         """Monthly cost of an RDS instance's allocated storage.
 

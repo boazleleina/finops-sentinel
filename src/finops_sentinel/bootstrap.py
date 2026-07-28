@@ -15,6 +15,7 @@ from finops_sentinel.adapters.aws.scanners.ec2 import StoppedEC2Scanner
 from finops_sentinel.adapters.aws.scanners.ec2_idle import IdleEC2Scanner
 from finops_sentinel.adapters.aws.scanners.eip import OrphanedEIPScanner
 from finops_sentinel.adapters.aws.scanners.rds import IdleRDSScanner, StoppedRDSScanner
+from finops_sentinel.adapters.aws.scanners.s3 import S3LifecycleScanner
 from finops_sentinel.adapters.notifications.console import ConsoleNotifier
 from finops_sentinel.adapters.notifications.slack import SlackAdapter
 from finops_sentinel.adapters.persistence.sqlalchemy_repo import SqlAlchemyRepository
@@ -73,6 +74,7 @@ def get_cloud_gateway(region: str | None = None) -> CloudGateway:
         endpoint_url=settings.aws_endpoint_url,
         aws_access_key_id=settings.aws_access_key_id,
         aws_secret_access_key=settings.aws_secret_access_key,
+        mpu_age_days=settings.s3_incomplete_mpu_age_days,
     )
 
 
@@ -172,6 +174,13 @@ def get_scanners(region: str | None = None) -> list[Scanner]:
             min_datapoints=settings.rds_idle_min_datapoints,
         ),
         StoppedRDSScanner(region=region, pricing=pricing),
+        S3LifecycleScanner(
+            region=region,
+            pricing=pricing,
+            min_bucket_size_gb=settings.s3_min_bucket_size_gb,
+            incomplete_mpu_age_days=settings.s3_incomplete_mpu_age_days,
+            addressable_fraction=settings.s3_lifecycle_addressable_fraction,
+        ),
     ]
 
 

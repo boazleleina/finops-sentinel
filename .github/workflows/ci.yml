@@ -15,7 +15,7 @@ jobs:
         ports:
           - 4566:4566
         env:
-          SERVICES: ec2,cloudwatch,sts
+          SERVICES: ec2,cloudwatch,sts,s3
           DEBUG: 1
 
     steps:

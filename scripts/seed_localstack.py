@@ -33,10 +33,10 @@ ENDPOINT_URL = settings.aws_endpoint_url or "http://localhost:4566"
 # Sizes and instance types per region, so the Slack alerts are visibly
 # different and the per-region savings table has something to rank.
 REGION_PROFILE = {
-    "default": {"volume_gb": 10, "protected_gb": 20, "snapshot_gb": 5, "idle_type": "m5.large"},
-    "us-east-1": {"volume_gb": 10, "protected_gb": 20, "snapshot_gb": 5, "idle_type": "m5.large"},
-    "eu-west-1": {"volume_gb": 200, "protected_gb": 40, "snapshot_gb": 60, "idle_type": "m5.2xlarge"},
-    "ap-southeast-2": {"volume_gb": 75, "protected_gb": 15, "snapshot_gb": 25, "idle_type": "c5.xlarge"},
+    "default": {"volume_gb": 10, "protected_gb": 20, "snapshot_gb": 5, "idle_type": "m5.large", "bucket_gb": 800},
+    "us-east-1": {"volume_gb": 10, "protected_gb": 20, "snapshot_gb": 5, "idle_type": "m5.large", "bucket_gb": 800},
+    "eu-west-1": {"volume_gb": 200, "protected_gb": 40, "snapshot_gb": 60, "idle_type": "m5.2xlarge", "bucket_gb": 4000},
+    "ap-southeast-2": {"volume_gb": 75, "protected_gb": 15, "snapshot_gb": 25, "idle_type": "c5.xlarge", "bucket_gb": 150},
 }
 
 
@@ -168,6 +168,117 @@ def seed_region(region: str) -> None:
     print(f"  Created running instance: {idle_id} ({profile['idle_type']})")
 
     publish_idle_metrics(idle_id, region)
+
+    seed_buckets(region, profile)
+
+
+def seed_buckets(region, profile):
+    """Four buckets covering every branch of the S3 rules.
+
+    LocalStack does not publish the AWS/S3 BucketSizeBytes metric, and the
+    scanner reads size from CloudWatch only — deliberately, since the
+    alternative is an unbounded ListObjectsV2 walk against real buckets. So the
+    sizes are published here as synthetic datapoints, exactly as
+    publish_idle_metrics already does for AWS/EC2.
+    """
+    s3 = boto3.client("s3", region_name=region, endpoint_url=ENDPOINT_URL)
+    suffix = region.replace("_", "-")
+    size_gb = profile["bucket_gb"]
+
+    print("Creating S3 buckets...")
+    create_args = {} if region == "us-east-1" else {
+        "CreateBucketConfiguration": {"LocationConstraint": region}
+    }
+
+    # 1. Large, no lifecycle policy, versioning on — the full s3_no_lifecycle case.
+    unmanaged = f"finops-demo-unmanaged-{suffix}"
+    s3.create_bucket(Bucket=unmanaged, **create_args)
+    s3.put_bucket_versioning(
+        Bucket=unmanaged, VersioningConfiguration={"Status": "Enabled"}
+    )
+    publish_bucket_size(unmanaged, region, size_gb)
+    print(f"  Created unmanaged bucket: {unmanaged} ({size_gb} GB, versioned)")
+
+    # 2. Same size, but has a policy — must NOT be flagged.
+    managed = f"finops-demo-managed-{suffix}"
+    s3.create_bucket(Bucket=managed, **create_args)
+    s3.put_bucket_lifecycle_configuration(
+        Bucket=managed,
+        LifecycleConfiguration={
+            "Rules": [
+                {
+                    "ID": "expire-old-versions",
+                    "Status": "Enabled",
+                    "Filter": {"Prefix": ""},
+                    "NoncurrentVersionExpiration": {"NoncurrentDays": 30},
+                }
+            ]
+        },
+    )
+    publish_bucket_size(managed, region, size_gb)
+    print(f"  Created managed bucket: {managed} (has lifecycle policy)")
+
+    # 3. Protected by tag — the domain must exclude it despite being unmanaged.
+    protected = f"finops-demo-protected-{suffix}"
+    s3.create_bucket(Bucket=protected, **create_args)
+    s3.put_bucket_tagging(
+        Bucket=protected,
+        Tagging={"TagSet": [{"Key": "finops:protected", "Value": "true"}]},
+    )
+    publish_bucket_size(protected, region, size_gb)
+    print(f"  Created protected bucket: {protected}")
+
+    # 4. An abandoned multipart upload — the one remediable S3 finding.
+    uploads = f"finops-demo-uploads-{suffix}"
+    s3.create_bucket(Bucket=uploads, **create_args)
+    s3.put_bucket_lifecycle_configuration(
+        Bucket=uploads,
+        LifecycleConfiguration={
+            "Rules": [
+                {"ID": "keep-quiet", "Status": "Enabled", "Filter": {"Prefix": ""},
+                 "Expiration": {"Days": 365}}
+            ]
+        },
+    )
+    upload_id = s3.create_multipart_upload(Bucket=uploads, Key="abandoned-backup.tar")[
+        "UploadId"
+    ]
+    s3.upload_part(
+        Bucket=uploads, Key="abandoned-backup.tar", UploadId=upload_id,
+        PartNumber=1, Body=b"x" * (5 * 1024 * 1024),
+    )
+    print(f"  Created abandoned multipart upload in {uploads} (5 MB part)")
+    # Initiated is stamped server-side, so a freshly seeded upload is minutes
+    # old and the default 7-day threshold correctly ignores it. Say so, or the
+    # one remediable S3 finding looks broken rather than newly created.
+    print(
+        "    (age is 0d — run with S3_INCOMPLETE_MPU_AGE_DAYS=0 to see the "
+        "s3_incomplete_multipart finding)"
+    )
+
+
+def publish_bucket_size(bucket, region, size_gb, days=3):
+    """Synthetic BucketSizeBytes, the daily metric AWS publishes and LocalStack does not."""
+    cloudwatch = boto3.client("cloudwatch", region_name=region, endpoint_url=ENDPOINT_URL)
+    now = datetime.now(UTC)
+    cloudwatch.put_metric_data(
+        Namespace="AWS/S3",
+        MetricData=[
+            {
+                "MetricName": "BucketSizeBytes",
+                "Dimensions": [
+                    {"Name": "BucketName", "Value": bucket},
+                    {"Name": "StorageType", "Value": "StandardStorage"},
+                ],
+                # Backdated: CloudWatch buckets by period and the one covering
+                # "now" is still open, so a point stamped now reads back empty.
+                "Timestamp": now - timedelta(days=day),
+                "Value": float(size_gb) * 1024**3,
+                "Unit": "Bytes",
+            }
+            for day in range(1, days + 1)
+        ],
+    )
 
 
 def publish_idle_metrics(instance_id, region, days=14, interval_hours=6):

@@ -132,6 +132,24 @@ RDS_STORAGE_GB_MONTH: dict[str, Decimal] = {
 }
 DEFAULT_RDS_STORAGE_GB_MONTH = RDS_STORAGE_GB_MONTH["gp2"]
 
+# S3 storage, $/GB-month, first 50TB tier. Source: https://aws.amazon.com/s3/pricing/
+# Standard is the default because that is where objects land without a
+# lifecycle policy — which is precisely what the s3_no_lifecycle rule flags.
+S3_GB_MONTH: dict[str, Decimal] = {
+    "STANDARD": Decimal("0.023"),
+    "STANDARD_IA": Decimal("0.0125"),
+    "ONEZONE_IA": Decimal("0.01"),
+    "INTELLIGENT_TIERING": Decimal("0.023"),
+    "GLACIER_IR": Decimal("0.004"),
+    "GLACIER": Decimal("0.0036"),
+    "DEEP_ARCHIVE": Decimal("0.00099"),
+}
+DEFAULT_S3_GB_MONTH = S3_GB_MONTH["STANDARD"]
+
+# Below a cent, quantizing to cents would round a real cost to $0.00 — which
+# the Pricing port forbids, because zero reads as "free" in the savings total.
+MIN_REPORTED_COST = Decimal("0.01")
+
 
 def _round(amount: Decimal) -> Decimal:
     return amount.quantize(CENTS, rounding=ROUND_HALF_UP)
@@ -178,6 +196,13 @@ class StaticPricing(Pricing):
         rate = RDS_HOURLY.get(instance_class, DEFAULT_RDS_HOURLY)
         multiplier = ENGINE_MULTIPLIER.get(engine, DEFAULT_ENGINE_MULTIPLIER)
         return _round(rate * multiplier * HOURS_PER_MONTH)
+
+    def s3_storage_monthly(self, size_gb: float, storage_class: str, region: str) -> Decimal:
+        self._check_region(region)
+        rate = S3_GB_MONTH.get(storage_class.upper(), DEFAULT_S3_GB_MONTH)
+        cost = _round(rate * Decimal(str(size_gb)))
+        # A small bucket still costs something; never report it as free.
+        return max(cost, MIN_REPORTED_COST)
 
     def rds_storage_monthly(self, size_gb: int, storage_type: str, region: str) -> Decimal:
         self._check_region(region)
