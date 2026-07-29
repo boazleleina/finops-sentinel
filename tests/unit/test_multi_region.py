@@ -17,27 +17,23 @@ from finops_sentinel.config import Settings, settings
 from finops_sentinel.domain.models import (
     Finding,
     FindingStatus,
-    Resource,
     ResourceLifecycle,
     ResourceType,
 )
 from finops_sentinel.domain.services import ScanTarget, approve_finding, run_scan
 from finops_sentinel.ports.scanner import Scanner
 from tests.fakes import FakeGatewayBase
+from tests.fakes import make_resource as base_make_resource
 
 
 def make_resource(resource_id, region, resource_type=ResourceType.EBS_VOLUME, seen=None):
-    now = seen or datetime.now(UTC)
-    return Resource(
-        id=f"res-{resource_id}",
+    """This module's defaults over the shared constructor in tests.fakes."""
+    return base_make_resource(
+        res_id=f"res-{resource_id}",
         resource_id=resource_id,
         resource_type=resource_type,
-        resource_arn=f"arn:aws:ec2:{region}:account:volume/{resource_id}",
         region=region,
-        current_tags={},
-        lifecycle=ResourceLifecycle.ACTIVE,
-        first_seen_at=now,
-        last_seen_at=now,
+        seen=seen,
     )
 
 

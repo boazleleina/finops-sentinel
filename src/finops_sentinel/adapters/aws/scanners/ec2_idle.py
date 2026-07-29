@@ -9,6 +9,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from finops_sentinel.adapters.aws.scanners import mean_or_zero
 from finops_sentinel.domain.models import (
     Finding,
     FindingStatus,
@@ -20,10 +21,6 @@ from finops_sentinel.domain.rules import is_protected as tag_is_protected
 from finops_sentinel.ports.cloud import CloudGateway
 from finops_sentinel.ports.pricing import Pricing
 from finops_sentinel.ports.scanner import Scanner
-
-
-def _mean(values: list[float]) -> float:
-    return sum(values) / len(values) if values else 0.0
 
 
 class IdleEC2Scanner(Scanner):
@@ -111,8 +108,8 @@ class IdleEC2Scanner(Scanner):
                 # CloudWatch gap). Silence beats a false positive.
                 continue
 
-            avg_cpu = _mean(cpu)
-            avg_network = _mean(metrics["NetworkIn"]) + _mean(metrics["NetworkOut"])
+            avg_cpu = mean_or_zero(cpu)
+            avg_network = mean_or_zero(metrics["NetworkIn"]) + mean_or_zero(metrics["NetworkOut"])
             if avg_cpu >= self.cpu_threshold_percent:
                 continue
             if avg_network >= self.network_threshold_bytes:

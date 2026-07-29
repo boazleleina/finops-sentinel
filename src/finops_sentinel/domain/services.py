@@ -748,10 +748,17 @@ def compose_digest_sections(
             "window_days": observation_days,
             "total_saving": str(saving),
         }
+        # Both costs and both CPU numbers, not just the deltas: the saving is
+        # checkable arithmetic when the two prices are shown, and peak-vs-avg
+        # side by side is the evidence an operator needs to disagree with the
+        # suggestion (a big gap says "bursty", a small one says "flat").
         lines = [
-            f"• `{s.resource_id}` ({s.region}) {s.current_instance_type} → "
-            f"{s.candidate.instance_type} — save ${s.candidate.monthly_saving_usd}/mo "
-            f"(peak CPU {s.max_cpu_percent}%, {s.datapoints} datapoints)"
+            f"• `{s.resource_id}` ({s.region}) "
+            f"{s.current_instance_type} ${s.current_monthly_cost_usd}/mo → "
+            f"{s.candidate.instance_type} ${s.candidate.monthly_cost_usd}/mo — "
+            f"save ${s.candidate.monthly_saving_usd}/mo "
+            f"(CPU peak {s.max_cpu_percent}% / avg {s.avg_cpu_percent}%, "
+            f"{s.datapoints} datapoints)"
             for s in suggestions
         ]
         sections.append(

@@ -224,14 +224,18 @@ def test_anomaly_section_leads_and_says_estimated_waste():
     assert "412.50" in sections[0]
 
 
-def test_suggestions_render_with_the_peak_that_drove_them():
+def test_suggestions_render_with_the_evidence_that_drove_them():
     sections = compose_digest_sections(_report([_suggestion()]), None, advisor=FakeAdvisor())
 
     rightsizing = sections[-1]
     assert "i-0abc" in rightsizing
-    assert "m5.xlarge → m6g.large" in rightsizing
-    assert "83.95" in rightsizing
-    assert "peak CPU 3.2%" in rightsizing
+    # Both prices, so the stated saving is checkable arithmetic rather than a
+    # number to take on faith.
+    assert "m5.xlarge $140.16/mo → m6g.large $56.21/mo" in rightsizing
+    assert "save $83.95/mo" in rightsizing
+    # Peak AND average: the gap between them is how an operator tells a
+    # genuinely flat box from a bursty one the suggestion would hurt.
+    assert "CPU peak 3.2% / avg 2.0%" in rightsizing
 
 
 def test_digest_with_nothing_to_report_still_says_so():
