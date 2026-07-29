@@ -90,6 +90,31 @@ class Settings(BaseSettings):
     # full cost as savings would let one large bucket dominate the total.
     s3_lifecycle_addressable_fraction: float = 0.20
 
+    # Right-sizing digest. Advisory only — there is no playbook that resizes an
+    # instance, and there will not be one: the change needs a stop/start and an
+    # architecture decision (Graviton), which is a deploy, not a cleanup.
+    rightsizing_observation_days: int = 14
+    # PEAK CPU below this suggests a downsize. Peak, never average: a box that
+    # spikes to 90% once an hour is correctly sized however low its mean is.
+    # Paired with a candidate list that steps down at most one size — halving
+    # vCPU roughly doubles utilisation, so 40% peak lands near 80% after.
+    rightsizing_cpu_headroom_percent: float = 40.0
+    rightsizing_min_datapoints: int = 24
+    # Cap on digest suggestions. Readability, not cost: the ones worth acting
+    # on sort to the top by saving.
+    digest_max_items: int = 10
+
+    # Spend anomaly. What is measured is estimated monthly WASTE (the total of
+    # live findings), not billed spend — there is no billing data in this
+    # system until a Cost Explorer adapter exists.
+    anomaly_window_days: int = 14
+    # Below this many days of history there is no verdict. An anomaly alert
+    # that fires on three days of data is one people learn to ignore.
+    anomaly_min_history_days: int = 7
+    # |z| at or above this is an anomaly. 2.0 is roughly the top/bottom 5% of a
+    # normal distribution — frequent enough to be useful, rare enough to read.
+    anomaly_z_threshold: float = 2.0
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
     @property
@@ -109,3 +134,19 @@ class Settings(BaseSettings):
         return ALL_REGIONS in {region.lower() for region in self.configured_regions}
 
 settings = Settings()
+
+
+def database_url() -> str:
+    """The one place the findings database URL is built.
+
+    Both the application (bootstrap.get_repository) and Alembic (alembic/env.py)
+    call this. They used to build it independently — env.py read the raw
+    environment with its own default while the app went through Settings, which
+    reads .env too. The documented setup puts SENTINEL_DB_PATH in .env, so
+    `alembic upgrade head` migrated .sentinel.db while `sentinel scan` used
+    data/sentinel.db, and nothing failed until the app reached a table the
+    migration had created somewhere else entirely.
+
+    One function, so the two cannot drift again.
+    """
+    return f"sqlite:///{settings.sentinel_db_path}"

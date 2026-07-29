@@ -1,9 +1,16 @@
 from abc import ABC, abstractmethod
 from collections.abc import Collection
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
-from finops_sentinel.domain.models import AuditEvent, Decision, Finding, FindingStatus, Resource
+from finops_sentinel.domain.models import (
+    AuditEvent,
+    Decision,
+    Finding,
+    FindingStatus,
+    Resource,
+    SpendSnapshot,
+)
 
 
 class FindingsRepository(ABC):
@@ -90,6 +97,23 @@ class FindingsRepository(ABC):
 
     @abstractmethod
     def get_latest_notification_time(self, finding_id: str) -> datetime | None:
+        ...
+
+    @abstractmethod
+    def record_spend_snapshot(self, snapshot: SpendSnapshot) -> None:
+        """Upsert one day's estimated-waste snapshot, keyed by its date.
+
+        Upsert rather than append: several scans a day are normal (a cron plus
+        a manual run), and appending would let a busy Tuesday contribute five
+        points to a mean that a quiet Wednesday contributes one to — skewing
+        the baseline by scan cadence rather than by spend. Last write for a
+        date wins, so the snapshot always reflects the latest known state.
+        """
+        ...
+
+    @abstractmethod
+    def get_spend_snapshots(self, since: date) -> list[SpendSnapshot]:
+        """Snapshots on or after `since`, oldest first."""
         ...
 
     @abstractmethod

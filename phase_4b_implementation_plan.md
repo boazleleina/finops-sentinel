@@ -2,8 +2,8 @@
 
 > ## ⏱ Current status — resume here
 >
-> **Branch:** `feat/phase-4-part-b`, 16 commits ahead of `709faed` (Part A tip).
-> **Everything below is committed, green, and verified live against LocalStack.**
+> **Branch:** `feat/phase-4-part-b`. **Every work package is implemented and
+> green.** Phase 4B is code-complete.
 >
 > | Package | State | Commits |
 > |---|---|---|
@@ -12,23 +12,29 @@
 > | W2 S3 scanners | ✅ done | `5f1b333` `be461b5` |
 > | PR 1 fixes found by running it | ✅ done | `2ba82c6` `466486d` `bc6c45f` `fe40399` `b4f67ac` `b4adb68` |
 > | PR 1 docs (W6a) | ✅ done | `813c155` |
-> | **W3 digest transport** | ✅ done | `10413c6` `5041602` |
-> | **W4 right-sizing digest** | ❌ **not started** | — |
-> | **W5 spend anomaly** | ❌ **not started** | — |
-> | W6b PR 2 docs | ❌ not started | — |
+> | W3 digest transport | ✅ done | `10413c6` `5041602` |
+> | **W4 right-sizing digest** | ✅ done | uncommitted |
+> | **W5 spend anomaly** | ✅ done | uncommitted |
+> | **W6b PR 2 docs** | ✅ done | uncommitted |
 >
-> **PR 1 is complete and mergeable.** PR 2 is one package of three.
+> `sentinel digest` exists and posts. `sentinel scan` now records a daily
+> `spend_snapshots` row, which is the input the z-score runs over.
 >
-> Nothing user-visible has changed since PR 1: W3 added two port methods and
-> the adapters behind them, but nothing calls them yet. `sentinel digest` does
-> not exist, and no digest is ever sent.
+> **Gates, last run:** 277 passed (integration suite included, LocalStack up),
+> global **96%** (gate 90), `domain/` **100%** (gate 95), ruff + mypy +
+> import-linter clean. Migration `b7e2f81c4a90` round-trips on a copy of the
+> real DB with no data loss. Run with `.venv/bin/pytest`, **not** `python -m
+> pytest` — see §11.3.
 >
-> **Gates, last run:** 218 passed, global 96% (gate 90), `domain/` 100% (gate
-> 95), ruff + mypy + import-linter clean. Run with `.venv/bin/pytest`, **not**
-> `python -m pytest` — see §11.
+> **All ten checklist items pass** (§5). The full sequence — LocalStack up,
+> seed, `sentinel scan`, `sentinel digest` — was run end to end from both the
+> host venv and the app container, against three regions and a live Slack
+> webhook.
 >
-> Start at **§3 W4**. §11 records what implementation taught us that the plan
-> got wrong; read it before trusting the remaining package descriptions.
+> §11 records what implementation taught us that the plan got wrong, including
+> **two defects that only running it exposed** (§11.5): the digest reporting
+> "nothing over-provisioned" when every region had failed, and Alembic
+> migrating a different database file than the app has used since Phase 1.
 
 **Branch:** `feat/phase-4-part-b` (off `feat/phase-4-part-a` / `main`)
 **Spec source:** `implementation_plan.md` §6 "Phase 4 — LLM Advisor adapter + metric-based idleness", minus the items already shipped in Part A.
@@ -279,7 +285,7 @@ reply cannot drift. `NarrationResponse` carries only `narrative` — no `risk`
 verdict, because unlike a finding summary there is nothing to act on.
 `FakeNotifier` and `FakeAdvisor` moved into `tests/fakes.py` (§11.4).
 
-### W4 — Right-sizing digest — ⬅ **NEXT**
+### W4 — Right-sizing digest — DONE (see 11.5 for what changed)
 
 | File | Change |
 |---|---|
@@ -304,7 +310,7 @@ summaries per scan. That still holds — but note `get_metric_averages` now take
 a dimension map, so the call is
 `get_metric_averages(namespace="AWS/EC2", dimensions={"InstanceId": id}, ...)`.
 
-### W5 — Anomaly v1 — ❌ not started
+### W5 — Anomaly v1 — DONE (see 11.5 for what changed)
 
 | File | Change |
 |---|---|
@@ -325,7 +331,7 @@ specific to rewriting a CHECK constraint on an existing table.
 **Narrator already exists** expecting facts keyed `date`, `value`, `mean`,
 `z_score`, `window_days`, `direction` (§11.4).
 
-### W6 — Docs, config surface, CI, verification — ⚠ PR 1 half done
+### W6 — Docs, config surface, CI, verification — DONE (both PRs)
 
 W6 is not one commit at the end — it splits across both PRs, each shipping the docs for what it contains (working-agreement rule 9).
 
@@ -365,10 +371,31 @@ work is PR 2 only:** README digest/anomaly section and its ~7 config vars.
 
 ## 5. "Done when" — verification checklist
 
-**Items 1–6 are verified and passing** (PR 1). Items 7–10 gate PR 2 and cannot
-be run until W4/W5 land. Item 4 was additionally confirmed live against a
-freshly reset three-region LocalStack: 8 findings per region, the managed
-bucket correctly unflagged, the protected bucket flagged but never notified.
+**Status after W4/W5: all ten items pass.** The full sequence — `docker
+compose --profile dev up -d localstack`, seed, `sentinel scan`, `sentinel
+digest` — was run end to end against a three-region LocalStack with a live
+Slack webhook: 24 findings (8 per region, protected ones reported and excluded
+from the $540.02 total), then a digest posting three right-sizing suggestions
+ordered by saving. The integration suite passes too (2 passed, no skips, with
+LocalStack up).
+
+Item 8's anomaly needs seven days of scan history, which one session cannot
+produce; it was verified against a seeded eight-day history instead (spike
+detected, z=38.0, narrated by the model and by the template with a dead
+endpoint). Against the real DB the digest correctly reports *"too little
+history to judge"* rather than "no anomaly" — the distinction W4 was written
+to preserve.
+
+| # | Item | State |
+|---|---|---|
+| 1 | ruff / mypy / lint-imports clean | ✅ re-run |
+| 2 | Split coverage gate: global 95% (≥90), `domain/` 100% (≥95) | ✅ re-run |
+| 3 | `upgrade head` → `downgrade -1` → `upgrade head` on a copy of the real DB | ✅ re-run, no data loss |
+| 4–6 | LocalStack scan, S3 remediation, RDS refusal | ✅ passed in PR 1; code untouched since |
+| 7 | `sentinel digest` posts a button-free digest ordered by saving | ✅ verified live to Slack — 3 suggestions, $167.90 / $74.46 / $13.87 |
+| 8 | ≥7 days of snapshots + a spike ⇒ digest leads with a narrated anomaly | ✅ verified live against a seeded DB |
+| 9 | Ollama down mid-digest still produces it, with template narration | ✅ verified both ways (live model, then a dead endpoint) |
+| 10 | `sentinel smoke-llm` still passes | ✅ 3/3 schema-valid, mean 4.76s |
 
 Spec gate: *"notifications carry LLM summaries, the weekly digest posts, and killing Ollama mid-run degrades gracefully to templates."* Part A covered the first and third for `summarize`; B extends them.
 
@@ -471,6 +498,67 @@ Every open question from the first draft is now settled. Recorded here so the ra
 
 ---
 
+## 11.5 W4/W5 as built — what changed from §3
+
+Both packages landed with their planned behaviour intact. Five differences
+worth recording:
+
+*   **A defect only running it exposed.** `build_rightsizing_digest` swallowed
+    a failed region into a log line, so with all three regions unreachable the
+    digest printed *"No over-provisioned instances found"* — the exact lie
+    `run_scan.regions_failed` exists to prevent, reintroduced one command
+    over. An empty suggestion list means "nothing to do" and "nothing could be
+    checked" identically, and only one of those is safe to act on by doing
+    nothing. Fixed by returning a **`RightsizingReport(suggestions,
+    regions_failed, instances_examined)`**, with the CLI printing the failures
+    in red and the digest message carrying an "⚠️ Incomplete coverage"
+    section. `instances_examined` is there for the same reason: empty over 40
+    instances is good news, empty over 0 is a broken pipeline.
+*   **`MetricTarget`, not `ScanTarget`.** The digest discovers nothing and
+    evaluates no rules, so reusing `ScanTarget` would have meant building
+    eight scanners per region to make one CloudWatch call each. `bootstrap`
+    gained `get_digest_targets()`.
+*   **The digest split into three functions, not one.**
+    `build_rightsizing_digest` (gathers), `compose_digest_sections` (pure
+    rendering — no clock, no repo, no send), `send_digest` (sends and audits
+    as `digest_sent`). §3 described one `build_rightsizing_digest(targets,
+    repo, advisor, pricing, ...)`; splitting it is what let the composition be
+    tested without a notifier at all.
+*   **Graviton rates were missing from `EC2_HOURLY`.** Right-sizing cannot
+    suggest a target it cannot price, so twelve `t4g`/`m6g`/`c6g`/`r6g` rates
+    were added alongside `RIGHTSIZING_CANDIDATES`. The candidate table steps
+    down **at most one size** on purpose, and that is load-bearing: it is what
+    makes `RIGHTSIZING_CPU_HEADROOM_PERCENT=40` safe, since halving vCPU
+    roughly doubles utilisation. Raising the threshold without shortening the
+    table breaks the pairing silently.
+*   **`_narrate` guards a raising advisor.** The Advisor port forbids raising
+    and both shipped adapters honour it, but this is the one caller where a
+    third-party implementation breaking the contract costs the *entire*
+    message rather than one finding's summary.
+
+**A second defect, older than Phase 4B and only exposed by it.**
+`sentinel scan` died on `no such table: spend_snapshots` against a database
+that `alembic upgrade head` had just reported migrating. Cause:
+`alembic/env.py` read `SENTINEL_DB_PATH` with `os.getenv` and its own
+`.sentinel.db` default, while the app read the same setting through
+pydantic-settings — which also reads `.env`. Since the documented setup puts
+`SENTINEL_DB_PATH=data/sentinel.db` in `.env` and not the shell, **every
+migration ever run landed on `.sentinel.db` (63 stale resources) while the app
+used `data/sentinel.db` (301)**. It caused no visible symptom for two phases
+because migrations `c447645246ac`–`a1c9f4d27b13` only ever had to exist for
+tables `Base.metadata.create_all` had already made; W5 was the first migration
+whose table nothing else creates. Fixed by giving the URL a single owner,
+`config.database_url()`, called by both `bootstrap.get_repository` and
+`env.py`, with `alembic.ini`'s hardcoded `sqlalchemy.url` emptied — it was
+dead config that read as authoritative. Four regression tests in
+`tests/unit/test_migration_target.py`. This belongs in §11.3's list of
+"two files, silently" environment traps.
+
+Migration id is **`b7e2f81c4a90`**, not `0004_*` — the repo names revisions
+with Alembic's generated hashes, as `a1c9f4d27b13` already did.
+
+---
+
 ## 11. What implementation changed — read before continuing
 
 The plan survived contact reasonably well, but not intact. Everything here is
@@ -547,3 +635,18 @@ W3 landed as specced. Two notes for W4 and W5:
 *   `tests/fakes.py` already has `FakeNotifier.digests` and
     `FakeAdvisor.narrations` recording lists — W4/W5 tests should assert
     against those rather than building new doubles.
+
+## I added this
+Verification checklist marked: items 1–6 verified, 7–10 gate PR 2 and can't run until W4/W5 land.
+
+W4, W5 and W6b are implemented and **all ten checklist items pass**, verified
+end to end against LocalStack and a live Slack workspace. See §11.5 for how
+the two packages differ from the plan as written, including two defects that
+only running the thing exposed — the digest reporting "nothing
+over-provisioned" when every region had failed, and Alembic migrating a
+different database file than the app has been using since Phase 1.
+
+Note for whoever runs this next: start LocalStack alone
+(`docker compose --profile dev up -d localstack`). `docker compose up -d` with
+no arguments does nothing — both services are behind the `dev`/`full`
+profiles — and `--build` is unnecessary when the CLI runs from the venv.

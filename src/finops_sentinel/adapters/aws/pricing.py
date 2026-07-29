@@ -24,6 +24,7 @@ No scanner changes.
 import logging
 from decimal import ROUND_HALF_UP, Decimal
 
+from finops_sentinel.domain.models import RightsizingCandidate
 from finops_sentinel.ports.pricing import Pricing
 
 logger = logging.getLogger(__name__)
@@ -67,10 +68,54 @@ EC2_HOURLY: dict[str, Decimal] = {
     "c5.xlarge": Decimal("0.17"),
     "r5.large": Decimal("0.126"),
     "r5.xlarge": Decimal("0.252"),
+    # Graviton (arm64). Present so right-sizing can suggest them; roughly 20%
+    # cheaper than the x86 equivalent at the same size, which is why a
+    # same-size Graviton move is often the whole saving.
+    "t4g.micro": Decimal("0.0084"),
+    "t4g.small": Decimal("0.0168"),
+    "t4g.medium": Decimal("0.0336"),
+    "t4g.large": Decimal("0.0672"),
+    "t4g.xlarge": Decimal("0.1344"),
+    "m6g.large": Decimal("0.077"),
+    "m6g.xlarge": Decimal("0.154"),
+    "m6g.2xlarge": Decimal("0.308"),
+    "c6g.large": Decimal("0.068"),
+    "c6g.xlarge": Decimal("0.136"),
+    "r6g.large": Decimal("0.1008"),
+    "r6g.xlarge": Decimal("0.2016"),
 }
 # Mid-range rather than cheapest: an unknown type should not be dismissed as
 # negligible, but must not manufacture savings that dwarf the real findings.
 DEFAULT_EC2_HOURLY = EC2_HOURLY["t3.medium"]
+
+# Right-sizing targets per instance type. Price-table knowledge, so it lives
+# with the prices — domain.rightsizing decides whether to suggest one, this
+# only says what exists and what it costs.
+#
+# Two rules govern every entry, and both exist to keep the suggestion safe:
+#
+# 1. **At most one size step down.** Halving vCPU roughly doubles utilisation,
+#    which the 40% peak-CPU default is calibrated against (40% peak lands near
+#    80% after a halving). A two-step entry would silently break that pairing.
+# 2. **Graviton is a same-workload swap, not a smaller machine** — but it is an
+#    architecture change, so it is a suggestion for a human, never a playbook.
+#
+# Anything not listed here yields no suggestion. A type the table cannot price
+# is a type this file has no business recommending a replacement for.
+RIGHTSIZING_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "t3.micro": ("t4g.micro",),
+    "t3.small": ("t3.micro", "t4g.small", "t4g.micro"),
+    "t3.medium": ("t3.small", "t4g.medium", "t4g.small"),
+    "t3.large": ("t3.medium", "t4g.large", "t4g.medium"),
+    "t3.xlarge": ("t3.large", "t4g.xlarge", "t4g.large"),
+    "m5.large": ("m6g.large",),
+    "m5.xlarge": ("m5.large", "m6g.xlarge", "m6g.large"),
+    "m5.2xlarge": ("m5.xlarge", "m6g.2xlarge", "m6g.xlarge"),
+    "c5.large": ("c6g.large",),
+    "c5.xlarge": ("c5.large", "c6g.xlarge", "c6g.large"),
+    "r5.large": ("r6g.large",),
+    "r5.xlarge": ("r5.large", "r6g.xlarge", "r6g.large"),
+}
 
 # A stopped instance bills nothing for compute but keeps paying for its root
 # volume. Used only when the volume itself could not be found in the scan
@@ -190,6 +235,33 @@ class StaticPricing(Pricing):
         self._check_region(region)
         rate = EC2_HOURLY.get(instance_type, DEFAULT_EC2_HOURLY)
         return _round(rate * HOURS_PER_MONTH)
+
+    def rightsizing_candidates(
+        self, instance_type: str, region: str
+    ) -> list[RightsizingCandidate]:
+        self._check_region(region)
+        # An unpriced type gets no candidates rather than DEFAULT_EC2_HOURLY's
+        # candidates: pricing an unknown m7i.48xlarge as a t3.medium and then
+        # "saving" money by moving it to a t3.small is worse than silence.
+        if instance_type not in EC2_HOURLY:
+            return []
+
+        current = _round(EC2_HOURLY[instance_type] * HOURS_PER_MONTH)
+        candidates = []
+        for target in RIGHTSIZING_CANDIDATES.get(instance_type, ()):
+            cost = _round(EC2_HOURLY[target] * HOURS_PER_MONTH)
+            if cost >= current:
+                continue  # a price change turned a candidate into an upgrade
+            candidates.append(
+                RightsizingCandidate(
+                    instance_type=target,
+                    monthly_cost_usd=cost,
+                    monthly_saving_usd=current - cost,
+                )
+            )
+
+        candidates.sort(key=lambda c: c.monthly_saving_usd, reverse=True)
+        return candidates
 
     def rds_instance_monthly(self, instance_class: str, engine: str, region: str) -> Decimal:
         self._check_region(region)

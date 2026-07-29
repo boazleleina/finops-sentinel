@@ -19,8 +19,8 @@ from finops_sentinel.adapters.aws.scanners.s3 import S3LifecycleScanner
 from finops_sentinel.adapters.notifications.console import ConsoleNotifier
 from finops_sentinel.adapters.notifications.slack import SlackAdapter
 from finops_sentinel.adapters.persistence.sqlalchemy_repo import SqlAlchemyRepository
-from finops_sentinel.config import settings
-from finops_sentinel.domain.services import ScanTarget
+from finops_sentinel.config import database_url, settings
+from finops_sentinel.domain.services import MetricTarget, ScanTarget
 from finops_sentinel.ports.advisor import Advisor
 from finops_sentinel.ports.cloud import CloudGateway
 from finops_sentinel.ports.notifier import Notifier
@@ -79,7 +79,9 @@ def get_cloud_gateway(region: str | None = None) -> CloudGateway:
 
 
 def get_repository() -> FindingsRepository:
-    return SqlAlchemyRepository(db_url=f"sqlite:///{settings.sentinel_db_path}")
+    # Same builder Alembic uses, so a migration can never target a different
+    # file than the one the app reads and writes.
+    return SqlAlchemyRepository(db_url=database_url())
 
 
 def get_notifier() -> Notifier:
@@ -182,6 +184,15 @@ def get_scanners(region: str | None = None) -> list[Scanner]:
             addressable_fraction=settings.s3_lifecycle_addressable_fraction,
         ),
     ]
+
+
+def get_digest_targets() -> list[MetricTarget]:
+    """One gateway per configured region, with no scanners attached.
+
+    The digest reads CloudWatch and discovers nothing, so building eight
+    scanners per region to make one metric call each would be pure waste.
+    """
+    return [MetricTarget(region=region, gateway=get_cloud_gateway(region)) for region in get_regions()]
 
 
 def get_scan_targets() -> list[ScanTarget]:

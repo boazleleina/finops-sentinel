@@ -1,6 +1,6 @@
 import json
 from collections.abc import Collection
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any
@@ -8,7 +8,9 @@ from typing import Any
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
+    Integer,
     String,
     TypeDecorator,
     create_engine,
@@ -26,6 +28,7 @@ from finops_sentinel.domain.models import (
     Resource,
     ResourceLifecycle,
     ResourceType,
+    SpendSnapshot,
 )
 from finops_sentinel.ports.repository import FindingsRepository
 
@@ -155,6 +158,21 @@ class RemediationModel(Base):
     detail: Mapped[str] = mapped_column(String)  # JSON — snapshot_id lives here
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class SpendSnapshotModel(Base):
+    """One row per day. The UNIQUE date is what makes the upsert an upsert —
+    without it, scan cadence would decide how much each day weighs in the mean.
+    """
+
+    __tablename__ = "spend_snapshots"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    snapshot_date: Mapped[date] = mapped_column(Date, unique=True, index=True)
+    total_estimated_monthly_usd: Mapped[Decimal] = mapped_column(SafeNumeric)
+    open_findings: Mapped[int] = mapped_column(Integer)
+    active_resources: Mapped[int] = mapped_column(Integer)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 def _to_resource(db_res: ResourceModel) -> Resource:
@@ -430,6 +448,55 @@ class SqlAlchemyRepository(FindingsRepository):
             if row is None:
                 return None
             return row.sent_at.replace(tzinfo=UTC)
+        finally:
+            db.close()
+
+    def record_spend_snapshot(self, snapshot: SpendSnapshot) -> None:
+        db = self.SessionLocal()
+        try:
+            row = (
+                db.query(SpendSnapshotModel)
+                .filter(SpendSnapshotModel.snapshot_date == snapshot.snapshot_date)
+                .first()
+            )
+            if row is None:
+                db.add(
+                    SpendSnapshotModel(
+                        snapshot_date=snapshot.snapshot_date,
+                        total_estimated_monthly_usd=snapshot.total_estimated_monthly_usd,
+                        open_findings=snapshot.open_findings,
+                        active_resources=snapshot.active_resources,
+                        captured_at=snapshot.captured_at,
+                    )
+                )
+            else:
+                row.total_estimated_monthly_usd = snapshot.total_estimated_monthly_usd
+                row.open_findings = snapshot.open_findings
+                row.active_resources = snapshot.active_resources
+                row.captured_at = snapshot.captured_at
+            db.commit()
+        finally:
+            db.close()
+
+    def get_spend_snapshots(self, since: date) -> list[SpendSnapshot]:
+        db = self.SessionLocal()
+        try:
+            rows = (
+                db.query(SpendSnapshotModel)
+                .filter(SpendSnapshotModel.snapshot_date >= since)
+                .order_by(SpendSnapshotModel.snapshot_date)
+                .all()
+            )
+            return [
+                SpendSnapshot(
+                    snapshot_date=row.snapshot_date,
+                    total_estimated_monthly_usd=row.total_estimated_monthly_usd,
+                    open_findings=row.open_findings,
+                    active_resources=row.active_resources,
+                    captured_at=row.captured_at.replace(tzinfo=UTC),
+                )
+                for row in rows
+            ]
         finally:
             db.close()
 

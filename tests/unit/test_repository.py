@@ -1,4 +1,4 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -11,6 +11,7 @@ from finops_sentinel.domain.models import (
     Resource,
     ResourceLifecycle,
     ResourceType,
+    SpendSnapshot,
 )
 
 
@@ -201,3 +202,55 @@ def test_record_remediation(repository):
         assert len(rows) == 1
         assert rows[0].result == "success"
         assert "snap-123" in rows[0].detail
+
+
+def _snapshot(day, total="100.00"):
+    return SpendSnapshot(
+        snapshot_date=day,
+        total_estimated_monthly_usd=Decimal(total),
+        open_findings=3,
+        active_resources=30,
+        captured_at=datetime.now(UTC),
+    )
+
+
+def test_spend_snapshot_upserts_by_date(repository):
+    """Several scans a day must collapse to one row, or scan cadence decides
+    how much a day weighs in the anomaly baseline."""
+    today = date(2026, 7, 28)
+    repository.record_spend_snapshot(_snapshot(today, "100.00"))
+    repository.record_spend_snapshot(_snapshot(today, "250.50"))
+
+    stored = repository.get_spend_snapshots(today)
+    assert len(stored) == 1
+    assert stored[0].total_estimated_monthly_usd == Decimal("250.50")
+
+
+def test_spend_snapshot_window_is_inclusive_of_since_and_ordered(repository):
+    for offset in range(5):
+        repository.record_spend_snapshot(
+            _snapshot(date(2026, 7, 24) + timedelta(days=offset), str(offset))
+        )
+
+    stored = repository.get_spend_snapshots(date(2026, 7, 26))
+
+    assert [s.snapshot_date for s in stored] == [
+        date(2026, 7, 26),
+        date(2026, 7, 27),
+        date(2026, 7, 28),
+    ]
+    assert [str(s.total_estimated_monthly_usd) for s in stored] == ["2", "3", "4"]
+
+
+def test_spend_snapshot_survives_the_decimal_round_trip(repository):
+    """Money through SQLite: stored as a string, never a float."""
+    day = date(2026, 7, 28)
+    repository.record_spend_snapshot(_snapshot(day, "1234.56"))
+
+    stored = repository.get_spend_snapshots(day)[0]
+    assert stored.total_estimated_monthly_usd == Decimal("1234.56")
+    assert stored.captured_at.tzinfo is not None
+
+
+def test_empty_snapshot_history_is_an_empty_list(repository):
+    assert repository.get_spend_snapshots(date(2026, 1, 1)) == []

@@ -8,7 +8,9 @@ from rich.table import Table
 
 from finops_sentinel.bootstrap import (
     get_advisor,
+    get_digest_targets,
     get_notifier,
+    get_pricing,
     get_regions,
     get_repository,
     get_scan_targets,
@@ -21,7 +23,14 @@ from finops_sentinel.domain.models import (
     ResourceLifecycle,
     ResourceType,
 )
-from finops_sentinel.domain.services import expire_stale, notify_open_findings, run_scan
+from finops_sentinel.domain.services import (
+    build_rightsizing_digest,
+    detect_spend_anomaly,
+    expire_stale,
+    notify_open_findings,
+    run_scan,
+    send_digest,
+)
 
 app = typer.Typer(help="FinOps Sentinel - AWS Cost Optimization Agent")
 console = Console()
@@ -149,7 +158,7 @@ def scan() -> None:
     # starves the two columns the report exists to communicate — a savings
     # column rendered as "$0…" is worse than no column at all.
     # Four columns fit an 80-column terminal exactly. Status is not among them:
-    # the notified count is already reported above, and 🔒 marks the findings
+    # the notified count is already reported above, and [P] marks the findings
     # deliberately held back — per-finding lifecycle detail belongs in
     # GET /findings, not in a summary that has to choose what to drop.
     table.add_column(
@@ -170,7 +179,8 @@ def scan() -> None:
         res_region = resource.region if resource else "?"
 
         table.add_row(
-            f"[bold green]🔒[/bold green] {res_id}" if f.protected else res_id,
+            # \[ escapes the bracket: Rich would otherwise read [P] as a markup tag.
+            rf"[bold green]\[P][/bold green] {res_id}" if f.protected else res_id,
             res_region,
             f.rule,
             f"${f.est_monthly_cost_usd:,.2f}",
@@ -185,7 +195,7 @@ def scan() -> None:
     console.print(table)
     if any(f.protected for f in findings):
         console.print(
-            "[dim]🔒 protected by tag — reported, never notified, never "
+            r"[dim]\[P] protected by tag — reported, never notified, never "
             "remediated, and excluded from the totals below.[/dim]"
         )
 
@@ -203,6 +213,120 @@ def scan() -> None:
     console.print(
         f"\n[bold]Total Potential Monthly Savings: [green]${total_savings:.2f}[/green][/bold]"
     )
+
+
+@app.command()
+def digest(
+    no_send: bool = typer.Option(
+        False, "--no-send", help="Render locally without posting to the notifier."
+    ),
+) -> None:
+    """
+    Post the advisory digest: right-sizing suggestions and any spend anomaly.
+
+    Advisory by construction — no Approve buttons, no status changes, nothing
+    remediated. Intended for a weekly schedule (the Phase 5 CronJob); --no-send
+    is for checking what it would say without spending a notification.
+    """
+    repo = get_repository()
+    advisor = get_advisor()
+
+    with console.status("[bold yellow]Reading metrics and spend history...[/bold yellow]"):
+        anomaly = detect_spend_anomaly(
+            repo,
+            window_days=settings.anomaly_window_days,
+            min_history_days=settings.anomaly_min_history_days,
+            z_threshold=settings.anomaly_z_threshold,
+        )
+        report = build_rightsizing_digest(
+            get_digest_targets(),
+            get_pricing(),
+            observation_days=settings.rightsizing_observation_days,
+            cpu_headroom_percent=settings.rightsizing_cpu_headroom_percent,
+            min_datapoints=settings.rightsizing_min_datapoints,
+            max_items=settings.digest_max_items,
+        )
+    suggestions = report.suggestions
+
+    if report.regions_failed:
+        # Same rule as `sentinel scan`: an empty result over regions that never
+        # answered must never read as "nothing to do here".
+        console.print(
+            f"\n[bold red]{len(report.regions_failed)} region(s) could not be checked — "
+            "the right-sizing results below are incomplete:[/bold red]"
+        )
+        for region, error in sorted(report.regions_failed.items()):
+            console.print(f"  [red]✗[/red] {region}: {_one_line(error)}")
+
+    if anomaly is not None:
+        # "Estimated waste" is said out loud every time this number appears.
+        # There is no billing data behind it, and a cost tool that blurs that
+        # line is one nobody can check.
+        arrow = "▲" if anomaly.direction == "increase" else "▼"
+        console.print(
+            f"\n[bold red]{arrow} Spend anomaly on {anomaly.date}[/bold red] — "
+            f"estimated monthly waste [bold]${anomaly.value}[/bold] vs. a "
+            f"${anomaly.mean} average (z={anomaly.z_score}) over "
+            f"{anomaly.window_days} days.\n"
+        )
+    else:
+        console.print(
+            "\n[dim]No spend anomaly (or too little history to judge — "
+            f"needs {settings.anomaly_min_history_days} days of scans).[/dim]\n"
+        )
+
+    if suggestions:
+        table = Table(title="Right-sizing Suggestions (advisory)")
+        table.add_column("Instance", style="cyan", no_wrap=True, overflow="ellipsis", max_width=22)
+        table.add_column("Region", style="yellow", no_wrap=True, width=14)
+        table.add_column("Now", style="blue", no_wrap=True, width=12)
+        table.add_column("Suggested", style="magenta", no_wrap=True, width=12)
+        table.add_column("Peak CPU", justify="right", no_wrap=True, width=9)
+        table.add_column("$/mo saved", justify="right", style="green", no_wrap=True, width=11)
+
+        for suggestion in suggestions:
+            table.add_row(
+                suggestion.resource_id,
+                suggestion.region,
+                suggestion.current_instance_type,
+                suggestion.candidate.instance_type,
+                f"{suggestion.max_cpu_percent:.1f}%",
+                f"${suggestion.candidate.monthly_saving_usd:,.2f}",
+            )
+        console.print(table)
+
+        total = sum(float(s.candidate.monthly_saving_usd) for s in suggestions)
+        console.print(
+            f"\n[bold]Right-sizing savings if all taken: [green]${total:.2f}[/green]/mo[/bold]"
+        )
+        console.print(
+            "[dim]Peak CPU, not average, drives these. Nothing here is remediable — "
+            "resizing needs a stop/start you have to schedule.[/dim]"
+        )
+    elif report.regions_failed and not report.instances_examined:
+        console.print(
+            "[bold yellow]No right-sizing verdict: nothing could be examined.[/bold yellow]"
+        )
+    else:
+        console.print(
+            f"[bold green]No over-provisioned instances found[/bold green] "
+            f"[dim]({report.instances_examined} running instance(s) examined).[/dim]"
+        )
+
+    if no_send:
+        console.print("\n[dim]--no-send: nothing was posted.[/dim]")
+        return
+
+    notifier = get_notifier()
+    send_digest(
+        repo,
+        notifier,
+        report,
+        anomaly=anomaly,
+        advisor=advisor,
+        observation_days=settings.rightsizing_observation_days,
+    )
+    console.print(f"\n[bold cyan]Digest posted via {notifier.channel_name}.[/bold cyan]")
 
 
 @app.command()
