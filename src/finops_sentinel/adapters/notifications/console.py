@@ -36,6 +36,10 @@ class ConsoleNotifier(Notifier):
         )
         return None
 
+    def send_digest(self, title: str, sections: list[str]) -> str | None:
+        logger.info("%s\n%s", title, "\n\n".join(sections))
+        return None
+
     def parse_callback(
         self, raw_body: bytes, headers: Mapping[str, str]
     ) -> tuple[Decision, dict[str, Any]]:

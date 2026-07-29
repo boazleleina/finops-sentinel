@@ -132,6 +132,45 @@ class SlackAdapter(Notifier):
         # interaction payload's response_url instead.
         return None
 
+    def send_digest(self, title: str, sections: list[str]) -> str | None:
+        """Post an advisory digest — header and sections, and no buttons.
+
+        The absence of an actions block is the contract, not an oversight. A
+        digest describes patterns across many resources; there is no single
+        finding id an Approve click could carry, and the domain would have
+        nothing to transition. Anything actionable arrives via
+        send_finding_alert instead.
+        """
+        webhook_url = settings.slack_webhook_url
+        if not webhook_url:
+            raise RuntimeError("SLACK_WEBHOOK_URL is not configured")
+
+        blocks: list[dict[str, Any]] = [
+            {"type": "header", "text": {"type": "plain_text", "text": title}}
+        ]
+        for section in sections:
+            blocks.append(
+                {"type": "section", "text": {"type": "mrkdwn", "text": section}}
+            )
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": "_Advisory digest — nothing here is actionable from Slack._",
+                    }
+                ],
+            }
+        )
+
+        response = WebhookClient(webhook_url).send(text=title, blocks=blocks)
+        if response.status_code != 200:
+            raise RuntimeError(f"Slack webhook returned {response.status_code}: {response.body}")
+
+        logger.info("Sent Slack digest: %s", title)
+        return None
+
     def parse_callback(
         self, raw_body: bytes, headers: Mapping[str, str]
     ) -> tuple[Decision, dict[str, Any]]:

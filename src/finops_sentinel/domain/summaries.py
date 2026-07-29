@@ -5,6 +5,8 @@ backend, every finding can still be explained. The OllamaAdvisor falls back
 here on timeout, transport error, or schema violation, and TemplateAdvisor
 uses it as its only implementation.
 """
+from typing import Any
+
 from finops_sentinel.domain.models import Finding, Resource
 
 # Per-rule copy. A rule with no entry still gets a usable sentence from
@@ -82,3 +84,49 @@ def render_template_summary(finding: Finding, resource: Resource) -> str:
         f"{resource.resource_type} {resource.resource_id} in {resource.region} — "
         f"est. ${finding.est_monthly_cost_usd}/mo. {body}"
     )
+
+
+# Narration topics. Every number these read was computed deterministically
+# elsewhere; the copy only arranges it.
+def _narrate_spend_anomaly(facts: dict[str, Any]) -> str:
+    direction = facts.get("direction", "changed")
+    verb = "above" if direction == "increase" else "below"
+    return (
+        f"Estimated monthly waste on {facts.get('date')} was "
+        f"${facts.get('value')}, {facts.get('z_score')} standard deviations "
+        f"{verb} the ${facts.get('mean')} average of the previous "
+        f"{facts.get('window_days')} days. Worth checking what changed — a new "
+        f"deployment, a stalled cleanup job, or simply more resources reaching "
+        f"the age thresholds at once."
+    )
+
+
+def _narrate_rightsizing(facts: dict[str, Any]) -> str:
+    return (
+        f"{facts.get('count')} instance(s) look over-provisioned across "
+        f"{facts.get('window_days')} days of metrics, worth about "
+        f"${facts.get('total_saving')}/mo if every suggestion were taken. "
+        f"These are advisory: peak utilisation, not average, drives the "
+        f"suggestion, but only you know what headroom each workload needs."
+    )
+
+
+_NARRATORS = {
+    "spend_anomaly": _narrate_spend_anomaly,
+    "rightsizing": _narrate_rightsizing,
+}
+
+
+def render_template_narration(topic: str, facts: dict[str, Any]) -> str:
+    """Deterministic prose for a digest section.
+
+    The floor under Advisor.narrate, so — like render_template_summary — it
+    must never raise. An unknown topic still produces something readable
+    rather than an exception in the middle of a digest, and a missing fact
+    renders as "None" rather than taking the whole notification down.
+    """
+    narrator = _NARRATORS.get(topic)
+    if narrator is None:
+        details = ", ".join(f"{key}: {value}" for key, value in sorted(facts.items()))
+        return f"{topic.replace('_', ' ').capitalize()} — {details}"
+    return narrator(facts)

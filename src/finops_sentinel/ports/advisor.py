@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from typing import Any
 
 from finops_sentinel.domain.models import Finding, Resource
 
@@ -22,5 +23,21 @@ class Advisor(ABC):
         detected, why it costs money, and what the safe next step is.
 
         Always returns a usable string. Never raises.
+        """
+        ...  # pragma: no cover
+
+    @abstractmethod
+    def narrate(self, topic: str, facts: dict[str, Any]) -> str:
+        """
+        Turn a set of already-computed facts into a sentence or two of prose,
+        for digest sections that are not about a single Finding.
+
+        The advisor narrates; it does not compute. Every number in `facts` was
+        derived deterministically in the domain — a spend anomaly's z-score, a
+        right-sizing suggestion's saving — precisely so that a model cannot
+        change what the system concluded, only how it reads. `topic` names the
+        kind of narration wanted; unknown topics still get usable prose.
+
+        Same contract as summarize: always returns a string, never raises.
         """
         ...  # pragma: no cover

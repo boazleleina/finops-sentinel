@@ -16,10 +16,15 @@ from finops_sentinel.domain.services import (
     notify_open_findings,
     run_scan,
 )
-from finops_sentinel.ports.advisor import Advisor
-from finops_sentinel.ports.notifier import Notifier
 from finops_sentinel.ports.scanner import Scanner
-from tests.fakes import FakeCloudGateway, make_finding, make_resource, resolver
+from tests.fakes import (
+    FakeAdvisor,
+    FakeCloudGateway,
+    FakeNotifier,
+    make_finding,
+    make_resource,
+    resolver,
+)
 
 
 class MockScanner(Scanner):
@@ -29,27 +34,6 @@ class MockScanner(Scanner):
     def evaluate(self, discover_results):
         res = discover_results[0][0]
         return [make_finding(status=FindingStatus.OPEN, resource_ref=res.id)]
-
-
-class FakeNotifier(Notifier):
-    """Appends alerts to a list. Zero Slack, zero HTTP."""
-
-    def __init__(self):
-        self.alerts = []
-
-    @property
-    def channel_name(self):
-        return "fake"
-
-    def send_finding_alert(self, finding, resource):
-        self.alerts.append((finding.id, resource.resource_id))
-        return f"msg-{len(self.alerts)}"
-
-    def parse_callback(self, raw_body, headers):
-        raise ValueError("not supported")
-
-    def confirm_decision(self, reply_context, text):
-        pass
 
 
 def seed(repository, *, finding_status=FindingStatus.NOTIFIED, tags=None, protected=False,
@@ -546,15 +530,6 @@ def test_deny_losing_the_transition_race_records_nothing(repository):
     )
 
 
-class FakeAdvisor(Advisor):
-    def __init__(self):
-        self.calls = []
-
-    def summarize(self, finding, resource):
-        self.calls.append(finding.id)
-        return f"advice for {finding.rule} on {resource.resource_id}"
-
-
 def test_notify_attaches_and_persists_advisor_summary(repository):
     seed(repository, finding_status=FindingStatus.OPEN)
     notifier = FakeNotifier()
@@ -578,7 +553,7 @@ def test_notify_without_advisor_leaves_summary_empty(repository):
 
 def test_advisor_failure_cannot_block_notification(repository):
     """The port forbids raising; a violating advisor must not strand findings."""
-    class ExplodingAdvisor(Advisor):
+    class ExplodingAdvisor(FakeAdvisor):
         def summarize(self, finding, resource):
             raise RuntimeError("ollama is on fire")
 

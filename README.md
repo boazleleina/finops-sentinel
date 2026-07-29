@@ -216,6 +216,24 @@ Four new rules across two services, and the guardrail work that made room for th
 *   **The guardrail that made S3 safe.** Both S3 rules sit on the same `ResourceType`, and `PLAYBOOK_ALLOWLIST` is keyed by type — so without listing `s3_no_lifecycle` in `NOTIFY_ONLY_RULES`, approving "no lifecycle policy" would have run the abort playbook belonging to its sibling. That is the closest the type-keyed allowlist has come to breaking; the code now records when it has to become rule-keyed.
 *   **Scanner-level failure isolation.** `run_scan` already guaranteed one bad region could not end a scan. The same argument applied one level down and was missing: every scanner in a region shared one `try`, so the first to raise discarded all the others' findings. On a real account a single missing IAM grant would do this — and the result, no findings, is indistinguishable from a clean account. Scanners now fail independently, are reported in `ScanResult.scanners_failed`, audited, and printed by the CLI.
 
+### Phase 4 (Part B2) Completed: Right-Sizing Digest & Spend Anomaly
+
+A second output channel: patterns rather than individual findings, posted as one advisory message with no buttons on it.
+
+*   **`sentinel digest` — advisory by construction.** The `Notifier.send_digest` contract forbids approve/deny affordances, and nothing in the digest path changes a finding's status. That is not a UI preference: a digest reports a *pattern*, and there is no finding id for a decision to act on. The one thing that can be approved is a `Finding`, and that still goes through the interactive alert path.
+*   **Right-sizing reads peak CPU, never average.** A box that idles all day and pegs 90% once an hour is correctly sized; its mean is 4%, and a mean-based tool would recommend halving the machine that carries its actual workload. Suggestions require `RIGHTSIZING_MIN_DATAPOINTS` of history, exclude anything tagged `finops:protected=true`, and pair a 40% peak-CPU threshold with a candidate list that only ever steps down **one** size — halving vCPU roughly doubles utilisation, so 40% peak lands near 80% on the target.
+*   **The digest re-reads CloudWatch instead of persisting metrics.** Right-sizing is about instances that are *not* idle, so no finding exists for them and no finding carries their metrics. The alternatives were a `metric_summaries` table written on every scan or one extra `GetMetricStatistics` pass on a weekly digest. The pass costs $0.01/1000 requests; the table is a schema forever.
+*   **"Estimated waste", not spend — stated everywhere the number appears.** There is no billing data in this system: Cost Explorer needs a real account and bills per request. What is genuinely available daily is the total `est_monthly_cost_usd` of live findings, which is what `spend_snapshots` records and what the z-score runs over. A Cost-Explorer-backed adapter can replace the input later without the maths changing — that is the port design paying off, and it is a better README line than a wrong number.
+*   **The anomaly maths is stdlib, in the domain, and the LLM only narrates it.** The spec said "deterministic pandas, in domain"; the architecture contract is named *"Domain is pure Python (pydantic only)"*, and a rolling mean/stdev/z-score is about twenty lines of `statistics`. Taking a 60MB dependency to avoid writing them would have made that claim false. Guards return *no verdict* rather than a weak one: fewer than `ANOMALY_MIN_HISTORY_DAYS` of history, or a zero-variance baseline, produces nothing — an alert that fires on three days of noise is one people learn to mute.
+*   **The candidate day is excluded from its own baseline.** At seven samples, a spike included in the mean and stdev it is being measured against inflates both enough to hide itself. Snapshots are also upserted **by date**, so three scans in one day collapse to one row — otherwise scan cadence, not spend, would decide how much a day weighs.
+
+```bash
+sentinel digest            # post it
+sentinel digest --no-send  # render locally without spending a notification
+```
+
+---
+
 ---
 
 ## Getting Started
@@ -264,6 +282,25 @@ docker compose --profile dev up -d --build
 
 This starts `localstack` (the AWS emulator) and `app` (the FastAPI server on port 8000).
 
+> [!WARNING]
+> **`docker compose up -d` on its own does nothing** — it exits with `no service selected`. Both services sit behind the `dev`/`full` profiles, so the `--profile dev` flag is not optional.
+
+If the build fails on `failed to solve: DeadlineExceeded` while loading metadata for `python:3.11-slim`, that is Docker Hub being unreachable, not a problem with this repo. Fetch the base image once and re-run:
+
+```bash
+docker pull python:3.11-slim
+docker compose --profile dev up -d --build
+```
+
+You can also skip the container entirely — see [Running from the host](#running-from-the-host) below. LocalStack alone is enough for every CLI command:
+
+```bash
+docker compose --profile dev up -d localstack
+```
+
+> [!IMPORTANT]
+> The image bakes the source in with `COPY`, so **after any code change you must `docker compose build app`**. Restarting the container silently re-runs the old image — which looks exactly like your change having no effect.
+
 ### 4. Create the database
 
 Alembic migrations are the only way the schema is ever created or changed. Run them **inside the container**:
@@ -275,16 +312,31 @@ docker compose exec app alembic upgrade head
 > [!IMPORTANT]
 > The container stores findings at `/app/data/sentinel.db`, and `docker-compose.yml` bind-mounts `./data` there, so with the shipped `SENTINEL_DB_PATH=data/sentinel.db` the host and the container are reading **one file**. Point them at different files and the mismatch is silent until every Slack **Approve** fails with *"cannot be approved"* — the server looking up findings in a database the scan never wrote to.
 
+Running it from the host works identically, and targets the same file:
+
+```bash
+alembic upgrade head
+```
+
+Alembic resolves the database through the application's own `SENTINEL_DB_PATH` setting — the same one `sentinel scan` reads, `.env` included. `alembic.ini` deliberately sets no `sqlalchemy.url`; a value there would read as authoritative and be silently ignored. If you need a one-off target, set the variable:
+
+```bash
+SENTINEL_DB_PATH=/tmp/scratch.db alembic upgrade head
+```
+
 > [!NOTE]
-> Upgrading an existing installation? Run this before your next scan. Phase 4B widened the `resources` CHECK constraint for the new RDS and S3 types, and a scan against an un-migrated database stops with an error naming this command — deliberately, since a half-written inventory would let the DELETED sweep disarm findings the failed pass never reached.
+> Upgrading an existing installation? Run this before your next scan. Phase 4B widened the `resources` CHECK constraint for the new RDS and S3 types and added the `spend_snapshots` table the digest's anomaly detection writes to. A scan against a database missing the CHECK widening stops with an error naming this command — deliberately, since a half-written inventory would let the DELETED sweep disarm findings the failed pass never reached.
 
 ### 5. Seed the emulator
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-python scripts/seed_localstack.py
+python3 scripts/seed_localstack.py
 ```
+
+> [!TIP]
+> `python3`, not `python` — a venv built by `python3 -m venv` on macOS does not always create a bare `python` shim, and `command not found: python` is the result. `.venv/bin/python scripts/seed_localstack.py` works from any shell, activated or not.
 
 This creates unattached EBS volumes (one tagged `finops:protected=true`), an orphaned Elastic IP, a stopped EC2 instance, orphaned snapshots, an idle running instance with the flat CloudWatch metrics the `ec2_idle` rule needs, and four S3 buckets — one unmanaged and versioned, one with a lifecycle policy that must *not* be flagged, one protected by tag, and one holding an abandoned multipart upload.
 
@@ -322,14 +374,14 @@ Notifications Sent: 15 (via slack)
 ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━┓
 ┃ Resource ID                ┃ Region         ┃ Rule             ┃     $/mo ┃
 ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━┩
-│ 🔒 vol-66fbac19370d381b9   │ us-east-1      │ ebs_unattached   │    $1.60 │
+│ [P] vol-66fbac19370d381b9  │ us-east-1      │ ebs_unattached   │    $1.60 │
 │ i-fb31312b10175f96b        │ us-east-1      │ ec2_idle         │   $70.08 │
-│ 🔒 finops-demo-protected-… │ us-east-1      │ s3_no_lifecycle  │    $3.68 │
+│ [P] finops-demo-protected… │ us-east-1      │ s3_no_lifecycle  │    $3.68 │
 │ finops-demo-unmanaged-us-… │ us-east-1      │ s3_no_lifecycle  │    $3.68 │
 │ i-6bd1543d54e7c349c        │ eu-west-1      │ ec2_idle         │  $280.32 │
 ...
 └────────────────────────────┴────────────────┴──────────────────┴──────────┘
-🔒 protected by tag — reported, never notified, never remediated, and excluded
+[P] protected by tag — reported, never notified, never remediated, and excluded
 from the totals below.
 ```
 
@@ -337,7 +389,7 @@ The `Findings database:` line is printed deliberately — if it does not match t
 
 `Inventory Discovered` counts what *this* scan saw in the cloud, not how many rows the database holds — resources seen by earlier scans and since deleted stay on file but are not counted here.
 
-Three behaviours worth noting in that table. Anything marked 🔒 is **protected by tag**: it stays `OPEN`, is never notified, and is excluded from the savings total. Findings only alert on the `OPEN → NOTIFIED` transition, so **re-running a scan against the same database sends no new Slack messages** — that is the design (re-scans must never resurrect decided findings), not a bug. And the failed-scanner block is not an error to fix locally: it is RDS being unavailable in free LocalStack, reported rather than hidden, because an empty result set otherwise reads exactly like a clean account. For a fresh set of alerts, reset the database:
+Three behaviours worth noting in that table. Anything marked `[P]` is **protected by tag**: it stays `OPEN`, is never notified, and is excluded from the savings total. Findings only alert on the `OPEN → NOTIFIED` transition, so **re-running a scan against the same database sends no new Slack messages** — that is the design (re-scans must never resurrect decided findings), not a bug. And the failed-scanner block is not an error to fix locally: it is RDS being unavailable in free LocalStack, reported rather than hidden, because an empty result set otherwise reads exactly like a clean account. For a fresh set of alerts, reset the database:
 
 ```bash
 docker compose exec app sh -c 'rm -f /app/data/sentinel.db'
@@ -354,7 +406,41 @@ ec2_idle  $70.08  notified
     Next step: Consider stopping or terminating the instance if it's no longer needed.
 ```
 
-### 7. Enable the Slack buttons
+### 7. Post the digest
+
+Separate from findings: patterns rather than individual resources, in one advisory message with no buttons on it.
+
+```bash
+docker compose exec app sentinel digest
+```
+
+```
+▲ Spend anomaly on 2026-07-29 — estimated monthly waste $412.50 vs. a $180.65
+average (z=38.0) over 7 days.
+
+                      Right-sizing Suggestions (advisory)
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━┓
+┃ Instance         ┃ Region      ┃ Now        ┃ Suggested ┃ Peak C… ┃ $/mo sa… ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━┩
+│ i-a91ac43e9f268… │ eu-west-1   │ m5.2xlarge │ m6g.xlar… │    0.4% │  $167.90 │
+│ i-48eb06977e861… │ ap-southea… │ c5.xlarge  │ c6g.large │    0.4% │   $74.46 │
+│ i-da0a5c483e981… │ us-east-1   │ m5.large   │ m6g.large │    0.4% │   $13.87 │
+└──────────────────┴─────────────┴────────────┴───────────┴─────────┴──────────┘
+
+Right-sizing savings if all taken: $256.23/mo
+Digest posted via slack.
+```
+
+`--no-send` renders it locally without posting, which is the safe way to see what it *would* say.
+
+Two things you will see on a first run, both correct:
+
+*   **"No spend anomaly (or too little history to judge — needs 7 days of scans)."** The z-score needs `ANOMALY_MIN_HISTORY_DAYS` of daily snapshots, and `sentinel scan` writes one row per day. On day one there is nothing to compare against, and the message says *too little history* rather than *no anomaly* — those are different statements and only one of them is reassuring.
+*   **Right-sizing suggestions on the seeded idle instances.** The seeded `m5.2xlarge` / `c5.xlarge` / `m5.large` all have flat CloudWatch CPU, so each gets a Graviton or one-size-down target. Nothing here is remediable: resizing needs a stop/start you have to schedule, so the digest carries no Approve button by contract.
+
+If regions fail, the digest says so rather than reporting a clean result — an empty suggestion list over regions that never answered means the opposite of an empty list over regions that did.
+
+### 8. Enable the Slack buttons
 
 The alerts arrive without this step, but clicking **Approve** or **Deny** needs Slack to reach your machine.
 
@@ -375,9 +461,9 @@ Copy the `Forwarding` URL (e.g. `https://<your-id>.ngrok.app`) into your Slack a
 
 Now click a button. Approve runs the allowlisted playbook — for an unattached volume that means snapshot-then-delete, so the data is recoverable — and edits the original message with the outcome. Requests with an invalid signature are rejected with `401`.
 
-One message will have **no buttons**: the `ec2_idle` advisory. That is intentional. Metric-inferred findings are never auto-remediated, so offering a button would promise an action the domain refuses.
+Several messages will have **no buttons**: the `ec2_idle`, `rds_idle`, `rds_stopped` and `s3_no_lifecycle` advisories, plus the whole digest. That is intentional, and it is the main reason an alert can look "missing" — an advisory posts as a plain message with no Approve/Deny row, so it reads differently from the interactive ones and is easy to scroll past. Metric-inferred and fractional-cost findings are never auto-remediated, so offering a button would promise an action the domain refuses.
 
-### 8. Verify the LLM advisor (optional)
+### 9. Verify the LLM advisor (optional)
 
 ```bash
 docker compose exec app sentinel smoke-llm --iterations 10
@@ -393,6 +479,52 @@ The advisor never blocks the pipeline: if Ollama is unreachable, slow, or return
 
 ```bash
 docker compose exec -e OLLAMA_BASE_URL=http://localhost:1 app sentinel scan
+```
+
+### Running from the host
+
+Every `docker compose exec app sentinel …` command above works identically from your venv, against the same database and the same LocalStack. You need the venv anyway to seed, and it skips the rebuild-after-every-change step:
+
+```bash
+docker compose --profile dev up -d localstack   # LocalStack only; no image build
+source .venv/bin/activate
+alembic upgrade head
+sentinel scan
+sentinel digest
+```
+
+Host and container resolve `data/sentinel.db` to **one file** (`SENTINEL_DB_PATH` from `.env` on the host, the `./data` bind mount in the container), so findings written by one are visible to the other. The container is what you want running for the FastAPI server and Slack callbacks; the CLI does not need it.
+
+### Why a scan sends no new Slack messages
+
+Findings alert exactly once, on the `OPEN → NOTIFIED` transition. **Re-running a scan against the same database therefore sends nothing** — the second scan re-detects the same findings, updates their cost and evidence, and leaves their status alone. That is the design: a re-scan must never resurrect a finding you already denied or remediated.
+
+So if alerts arrived once and then stopped, nothing is broken. To check what was actually sent rather than guessing:
+
+```bash
+sqlite3 -header -column data/sentinel.db "
+  select f.rule, count(distinct f.id) findings, count(n.id) notified
+  from findings f left join notifications n on n.finding_id = f.id
+  group by f.rule order by f.rule;"
+```
+
+A rule showing fewer `notified` than `findings` is usually protected resources, which are counted as findings and deliberately never notified.
+
+To get a fresh set of alerts, re-arm the findings you want rather than wiping the database:
+
+```bash
+# Re-notify every S3 finding on the next scan
+sqlite3 data/sentinel.db \
+  "update findings set status='open' where rule like 's3%' and status='notified';"
+sentinel scan
+```
+
+Or start completely clean:
+
+```bash
+docker compose --profile dev down && rm -rf ./volume/* ./data/sentinel.db
+docker compose --profile dev up -d
+alembic upgrade head && python3 scripts/seed_localstack.py && sentinel scan
 ```
 
 ---
@@ -479,6 +611,24 @@ Every setting, its default, and what it does. All are environment variables, rea
 | `S3_LIFECYCLE_ADDRESSABLE_FRACTION` | `0.20` | Share of a bucket's cost a lifecycle policy could plausibly recover |
 
 There is deliberately no `RDS_STOPPED_THRESHOLD_DAYS`. `DescribeDBInstances` exposes no stopped-since timestamp, so "stopped for N days" is not a question the API can answer — and since AWS restarts a stopped instance after 7 days anyway, the state itself is the finding.
+
+### Digest and anomaly
+
+The digest is a separate output from findings: advisory, button-free, and never tied to a resource's lifecycle.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `RIGHTSIZING_OBSERVATION_DAYS` | `14` | CloudWatch window read by `sentinel digest` |
+| `RIGHTSIZING_CPU_HEADROOM_PERCENT` | `40.0` | **Peak** CPU below this suggests a smaller type. Peak, not average — see below |
+| `RIGHTSIZING_MIN_DATAPOINTS` | `24` | Refuse to judge a shorter series |
+| `DIGEST_MAX_ITEMS` | `10` | Cap on suggestions per digest; biggest savings sort first |
+| `ANOMALY_WINDOW_DAYS` | `14` | Trailing window the mean and stdev are computed over |
+| `ANOMALY_MIN_HISTORY_DAYS` | `7` | Below this many days of scan history there is no verdict |
+| `ANOMALY_Z_THRESHOLD` | `2.0` | \|z\| at or above this is an anomaly — roughly the outer 5% of a normal distribution |
+
+Raising `RIGHTSIZING_CPU_HEADROOM_PERCENT` without shortening the candidate table in `adapters/aws/pricing.py` breaks the pairing the default rests on: the table steps down at most one size precisely so a 40% peak lands near 80% after a halving.
+
+The anomaly runs on **estimated monthly waste** — the total of open and notified, non-protected findings, snapshotted daily by `sentinel scan` into `spend_snapshots`. It is not billed spend, and the CLI, the digest, and the audit trail all say so.
 
 ### LLM advisor
 
@@ -588,6 +738,7 @@ To move to real numbers, add a second adapter implementing the same port — aga
 | Command | Description |
 |---|---|
 | `sentinel scan` | Two-pass scan across every configured region: inventory upsert, rule evaluation, then notify new findings |
+| `sentinel digest` | Post the advisory digest: right-sizing suggestions and any spend anomaly. `--no-send` renders it locally without posting. Intended for a weekly schedule |
 | `sentinel regions` | List the regions the current configuration will scan, without running one |
 | `sentinel serve` | Start the FastAPI server (`--host`, `--port`) |
 | `sentinel expire` | Expire NOTIFIED findings older than 72 hours |
@@ -654,7 +805,7 @@ One consequence is worth stating plainly: **S3 bucket size is queried with two C
 *   ~~**Phase 3:** Containerize applications using Docker and set up automated GitHub Actions CI/CD pipelines.~~ (Completed)
 *   ~~**Phase 4 (Part A):** Integrate the Ollama LLM-Advisor adapter for automated optimization descriptions, plus metric-based idle EC2 detection.~~ (Completed)
 *   ~~**Phase 4 (Part B1):** `rds_idle` / `rds_stopped` and the S3 lifecycle scanners, an Alembic migration for the new resource types, and per-scanner failure isolation.~~ (Completed)
-*   **Phase 4 (Part B2):** Right-sizing digest (14-day metric summaries → advisory-only, no buttons) and anomaly detection — a rolling z-score over daily estimated waste, computed deterministically in the domain with the Advisor only narrating it.
+*   ~~**Phase 4 (Part B2):** Right-sizing digest (14-day metric summaries → advisory-only, no buttons) and anomaly detection — a rolling z-score over daily estimated waste, computed deterministically in the domain with the Advisor only narrating it.~~ (Completed)
 *   **Phase 5:** Scaffold Kubernetes local orchestration via Helm charts.
 
 ---

@@ -1,4 +1,3 @@
-import os
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config
@@ -18,6 +17,7 @@ if config.config_file_name is not None:
 # add your model's MetaData object here
 # for 'autogenerate' support
 from finops_sentinel.adapters.persistence.sqlalchemy_repo import Base
+from finops_sentinel.config import database_url
 target_metadata = Base.metadata
 
 # other values from the config, defined by the needs of env.py,
@@ -26,8 +26,16 @@ target_metadata = Base.metadata
 # ... etc.
 
 def get_url():
-    db_path = os.getenv("SENTINEL_DB_PATH", ".sentinel.db")
-    return f"sqlite:///{db_path}"
+    """The database the APPLICATION uses — resolved the way the application resolves it.
+
+    Delegates to config.database_url rather than reading the environment here.
+    An earlier version used os.getenv with its own ".sentinel.db" default,
+    which silently disagreed with the app the moment SENTINEL_DB_PATH lived in
+    .env rather than the shell — which is the documented setup. Real
+    environment variables still win, because pydantic-settings ranks them
+    above .env.
+    """
+    return database_url()
 
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode."""

@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from decimal import Decimal
 
+from finops_sentinel.domain.models import RightsizingCandidate
+
 
 class Pricing(ABC):
     """
@@ -46,6 +48,24 @@ class Pricing(ABC):
     @abstractmethod
     def ec2_instance_monthly(self, instance_type: str, region: str) -> Decimal:
         """Monthly on-demand cost of a running instance."""
+        ...  # pragma: no cover
+
+    @abstractmethod
+    def rightsizing_candidates(
+        self, instance_type: str, region: str
+    ) -> list[RightsizingCandidate]:
+        """Cheaper instance types this one could be replaced by, biggest saving first.
+
+        Strictly a price question. This port supplies *what is cheaper* and
+        never *whether to recommend it* — the utilisation judgement lives in
+        domain.rightsizing, so a price-table edit can never change what counts
+        as over-provisioned.
+
+        Returns an empty list when nothing cheaper is known: the smallest type
+        in its family, or a type the implementation has no price for. Guessing
+        a target from a name pattern would produce advice about hardware the
+        implementation cannot price.
+        """
         ...  # pragma: no cover
 
     @abstractmethod

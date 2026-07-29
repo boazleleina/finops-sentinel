@@ -29,6 +29,23 @@ class Notifier(ABC):
         ...  # pragma: no cover
 
     @abstractmethod
+    def send_digest(self, title: str, sections: list[str]) -> str | None:
+        """
+        Send a periodic advisory digest — right-sizing suggestions, spend
+        anomalies — as a single message.
+
+        Advisory by contract: implementations MUST NOT attach approve/deny
+        affordances. A digest reports patterns rather than individual findings,
+        and there is no finding id for a decision to act on. The one thing that
+        can be approved is a Finding, and that goes through
+        send_finding_alert.
+
+        `sections` are pre-rendered blocks of text, in display order. Returns a
+        message reference where the transport has one, else None.
+        """
+        ...  # pragma: no cover
+
+    @abstractmethod
     def parse_callback(
         self, raw_body: bytes, headers: Mapping[str, str]
     ) -> tuple[Decision, dict[str, Any]]:

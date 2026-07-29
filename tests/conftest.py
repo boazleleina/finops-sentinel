@@ -5,6 +5,13 @@ import os
 # and drown out the snapshots our tests create.
 os.environ["MOTO_EC2_LOAD_DEFAULT_AMIS"] = "false"
 
+# Rich emits ANSI escapes when FORCE_COLOR is set, and the CLI tests assert on
+# plain substrings of the rendered output. CI does not set it, so this only
+# ever bit developers who have it in their shell — seven failures that look
+# like a real regression and are nothing but a terminal preference.
+os.environ.pop("FORCE_COLOR", None)
+os.environ["NO_COLOR"] = "1"
+
 import boto3
 import pytest
 from moto import mock_aws

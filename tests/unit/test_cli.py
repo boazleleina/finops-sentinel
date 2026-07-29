@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -44,8 +44,15 @@ from finops_sentinel.domain.models import (
     Resource,
     ResourceLifecycle,
     ResourceType,
+    RightsizingCandidate,
+    RightsizingSuggestion,
+    SpendAnomaly,
 )
-from finops_sentinel.domain.services import ScanResult, ScanTarget
+from finops_sentinel.domain.services import (
+    RightsizingReport,
+    ScanResult,
+    ScanTarget,
+)
 
 runner = CliRunner()
 
@@ -280,3 +287,135 @@ def test_expire_command(mock_repo, mock_expire):
     assert result.exit_code == 0
     assert "Expired 1 stale finding" in result.stdout
     assert "f-old" in result.stdout
+
+
+# --------------------------------------------------------------------------
+# sentinel digest — advisory, button-free, and honest about what it measures
+# --------------------------------------------------------------------------
+
+
+def _cli_suggestion():
+    return RightsizingSuggestion(
+        resource_id="i-0abc",
+        region="us-east-1",
+        current_instance_type="m5.xlarge",
+        current_monthly_cost_usd=Decimal("140.16"),
+        candidate=RightsizingCandidate(
+            instance_type="m6g.large",
+            monthly_cost_usd=Decimal("56.21"),
+            monthly_saving_usd=Decimal("83.95"),
+        ),
+        max_cpu_percent=3.2,
+        avg_cpu_percent=2.0,
+        datapoints=336,
+        observation_days=14,
+    )
+
+
+def _cli_anomaly():
+    return SpendAnomaly(
+        date=date(2026, 7, 27),
+        value=Decimal("412.50"),
+        mean=Decimal("180.00"),
+        stdev=Decimal("40.00"),
+        z_score=5.81,
+        direction="increase",
+        window_days=14,
+    )
+
+
+@patch("finops_sentinel.adapters.inbound.cli.send_digest")
+@patch("finops_sentinel.adapters.inbound.cli.build_rightsizing_digest")
+@patch("finops_sentinel.adapters.inbound.cli.detect_spend_anomaly")
+@patch("finops_sentinel.adapters.inbound.cli.get_digest_targets")
+@patch("finops_sentinel.adapters.inbound.cli.get_advisor")
+@patch("finops_sentinel.adapters.inbound.cli.get_notifier")
+@patch("finops_sentinel.adapters.inbound.cli.get_repository")
+def test_digest_command_renders_suggestions_and_posts(
+    mock_repo, mock_notifier, mock_advisor, mock_targets, mock_anomaly, mock_build, mock_send
+):
+    mock_targets.return_value = []
+    mock_anomaly.return_value = _cli_anomaly()
+    mock_build.return_value = RightsizingReport([_cli_suggestion()], {}, 4)
+
+    result = runner.invoke(app, ["digest"])
+
+    assert result.exit_code == 0
+    assert "i-0abc" in result.stdout
+    assert "m6g.large" in result.stdout
+    assert "$83.95" in result.stdout
+    # The honesty line: this is not billed spend, and the CLI says so too.
+    assert "estimated monthly waste" in result.stdout
+    assert "Spend anomaly on 2026-07-27" in result.stdout
+    mock_send.assert_called_once()
+
+
+@patch("finops_sentinel.adapters.inbound.cli.send_digest")
+@patch("finops_sentinel.adapters.inbound.cli.build_rightsizing_digest")
+@patch("finops_sentinel.adapters.inbound.cli.detect_spend_anomaly")
+@patch("finops_sentinel.adapters.inbound.cli.get_digest_targets")
+@patch("finops_sentinel.adapters.inbound.cli.get_advisor")
+@patch("finops_sentinel.adapters.inbound.cli.get_notifier")
+@patch("finops_sentinel.adapters.inbound.cli.get_repository")
+def test_digest_no_send_posts_nothing(
+    mock_repo, mock_notifier, mock_advisor, mock_targets, mock_anomaly, mock_build, mock_send
+):
+    mock_targets.return_value = []
+    mock_anomaly.return_value = None
+    mock_build.return_value = RightsizingReport([_cli_suggestion()], {}, 4)
+
+    result = runner.invoke(app, ["digest", "--no-send"])
+
+    assert result.exit_code == 0
+    assert "nothing was posted" in result.stdout
+    mock_send.assert_not_called()
+
+
+@patch("finops_sentinel.adapters.inbound.cli.send_digest")
+@patch("finops_sentinel.adapters.inbound.cli.build_rightsizing_digest")
+@patch("finops_sentinel.adapters.inbound.cli.detect_spend_anomaly")
+@patch("finops_sentinel.adapters.inbound.cli.get_digest_targets")
+@patch("finops_sentinel.adapters.inbound.cli.get_advisor")
+@patch("finops_sentinel.adapters.inbound.cli.get_notifier")
+@patch("finops_sentinel.adapters.inbound.cli.get_repository")
+def test_digest_with_nothing_to_report_explains_the_silence(
+    mock_repo, mock_notifier, mock_advisor, mock_targets, mock_anomaly, mock_build, mock_send
+):
+    """"No anomaly" and "not enough history to have one" are different
+    statements, and only one of them is reassuring."""
+    mock_targets.return_value = []
+    mock_anomaly.return_value = None
+    mock_build.return_value = RightsizingReport([], {}, 4)
+
+    result = runner.invoke(app, ["digest"])
+
+    assert result.exit_code == 0
+    assert "No over-provisioned instances found" in result.stdout
+    assert "too little history to judge" in result.stdout
+    mock_send.assert_called_once()
+
+
+@patch("finops_sentinel.adapters.inbound.cli.send_digest")
+@patch("finops_sentinel.adapters.inbound.cli.build_rightsizing_digest")
+@patch("finops_sentinel.adapters.inbound.cli.detect_spend_anomaly")
+@patch("finops_sentinel.adapters.inbound.cli.get_digest_targets")
+@patch("finops_sentinel.adapters.inbound.cli.get_advisor")
+@patch("finops_sentinel.adapters.inbound.cli.get_notifier")
+@patch("finops_sentinel.adapters.inbound.cli.get_repository")
+def test_digest_never_reports_a_clean_result_over_failed_regions(
+    mock_repo, mock_notifier, mock_advisor, mock_targets, mock_anomaly, mock_build, mock_send
+):
+    """Same guarantee `sentinel scan` makes: an empty result over regions that
+    never answered must not print as a clean bill of health."""
+    mock_targets.return_value = []
+    mock_anomaly.return_value = None
+    mock_build.return_value = RightsizingReport(
+        [], {"eu-west-1": "EndpointConnectionError: Could not connect"}, 0
+    )
+
+    result = runner.invoke(app, ["digest"])
+
+    assert result.exit_code == 0
+    assert "could not be checked" in result.stdout
+    assert "eu-west-1" in result.stdout
+    assert "No over-provisioned instances found" not in result.stdout

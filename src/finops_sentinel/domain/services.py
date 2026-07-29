@@ -9,9 +9,11 @@ import logging
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any, NamedTuple
 
 from finops_sentinel.domain import rules
+from finops_sentinel.domain.anomaly import detect_anomaly
 from finops_sentinel.domain.models import (
     TRANSITIONS,
     AuditEvent,
@@ -20,17 +22,30 @@ from finops_sentinel.domain.models import (
     FindingStatus,
     Resource,
     ResourceLifecycle,
+    RightsizingSuggestion,
+    SpendAnomaly,
+    SpendSnapshot,
 )
-from finops_sentinel.domain.summaries import render_template_summary
+from finops_sentinel.domain.rightsizing import rank_suggestions, suggest_rightsizing, total_saving
+from finops_sentinel.domain.summaries import render_template_narration, render_template_summary
 from finops_sentinel.ports.advisor import Advisor
 from finops_sentinel.ports.cloud import CloudGateway
 from finops_sentinel.ports.notifier import Notifier
+from finops_sentinel.ports.pricing import Pricing
 from finops_sentinel.ports.repository import FindingsRepository
 from finops_sentinel.ports.scanner import Scanner
 
 logger = logging.getLogger(__name__)
 
 EXPIRY_HOURS = 72
+
+# Findings that still represent money being spent right now. DENIED,
+# REMEDIATED and EXPIRED are excluded: the first two are decided, and an
+# expired finding is one nobody acted on within the window — re-detected next
+# scan if it is still real. Protected findings are excluded too, matching the
+# CLI's savings total: they are reported, never actioned, and counting them
+# would make the trend line move when someone adds a tag.
+LIVE_FINDING_STATUSES = frozenset({FindingStatus.OPEN, FindingStatus.NOTIFIED})
 
 # Max LLM calls per notify pass. Local inference costs seconds per finding, so
 # the spend goes to the most expensive findings and everything else takes the
@@ -236,6 +251,8 @@ def run_scan(
 
             for finding in findings:
                 repo.save_finding(finding)
+
+    record_spend_snapshot(repo)
 
     _audit(
         repo,
@@ -492,6 +509,314 @@ def deny_finding(
     )
     _audit(repo, "finding_denied", finding.id, {"actor": actor, "channel": channel})
     return True
+
+
+class MetricTarget(NamedTuple):
+    """One region's gateway, for work that reads metrics but scans nothing.
+
+    Deliberately not a ScanTarget: the digest builds no inventory and evaluates
+    no rules, so handing it a scanner list would imply a discovery pass that
+    never happens — and would mean building eight scanners per region to make
+    one CloudWatch call each.
+    """
+
+    region: str
+    gateway: CloudGateway
+
+
+def record_spend_snapshot(repo: FindingsRepository) -> SpendSnapshot:
+    """Store today's estimated monthly waste, so tomorrow has something to compare to.
+
+    "Estimated waste", not spend — see SpendSnapshot. Upserted by date, so the
+    third scan of the day overwrites the first two rather than triple-weighting
+    today in the trailing mean.
+    """
+    now = datetime.now(UTC)
+    live = [
+        finding
+        for finding in repo.get_findings()
+        if finding.status in LIVE_FINDING_STATUSES and not finding.protected
+    ]
+    active = [
+        resource
+        for resource in repo.get_all_resources()
+        if resource.lifecycle == ResourceLifecycle.ACTIVE
+    ]
+    snapshot = SpendSnapshot(
+        snapshot_date=now.date(),
+        total_estimated_monthly_usd=sum(
+            (finding.est_monthly_cost_usd for finding in live), Decimal(0)
+        ),
+        open_findings=len(live),
+        active_resources=len(active),
+        captured_at=now,
+    )
+    repo.record_spend_snapshot(snapshot)
+    _audit(
+        repo,
+        "spend_snapshot_recorded",
+        None,
+        {
+            "date": snapshot.snapshot_date.isoformat(),
+            "total_estimated_monthly_usd": str(snapshot.total_estimated_monthly_usd),
+            "open_findings": snapshot.open_findings,
+            "active_resources": snapshot.active_resources,
+        },
+    )
+    return snapshot
+
+
+def detect_spend_anomaly(
+    repo: FindingsRepository,
+    window_days: int = 14,
+    min_history_days: int = 7,
+    z_threshold: float = 2.0,
+) -> SpendAnomaly | None:
+    """Today's estimated waste against its own trailing distribution.
+
+    Reads one extra day either side of the window so the maths in
+    domain.anomaly gets a full baseline plus the candidate day, and so a
+    missing day (no scan ran) narrows the baseline rather than shifting it.
+    """
+    since = (datetime.now(UTC) - timedelta(days=window_days + 1)).date()
+    snapshots = repo.get_spend_snapshots(since)
+    return detect_anomaly(
+        snapshots,
+        window_days=window_days,
+        min_history_days=min_history_days,
+        z_threshold=z_threshold,
+    )
+
+
+class RightsizingReport(NamedTuple):
+    """Suggestions plus what was actually looked at to produce them.
+
+    instances_examined is here for the same reason regions_failed is: an empty
+    suggestion list over 40 instances is good news, and an empty one over zero
+    instances is a broken pipeline. The list alone cannot tell them apart.
+    """
+
+    suggestions: list[RightsizingSuggestion]
+    regions_failed: dict[str, str]
+    instances_examined: int
+
+
+def build_rightsizing_digest(
+    targets: Sequence[MetricTarget],
+    pricing: Pricing,
+    observation_days: int = 14,
+    cpu_headroom_percent: float = 40.0,
+    min_datapoints: int = 24,
+    max_items: int = 10,
+) -> RightsizingReport:
+    """Suggest smaller instance types for running boxes that never get busy.
+
+    This re-reads CloudWatch rather than using anything a scan stored, because
+    right-sizing is about instances that are NOT idle — no finding exists for
+    them, so no finding carries their metrics. One extra GetMetricStatistics
+    pass on a weekly digest is $0.01/1000 requests; a metric_summaries table
+    written on every scan is a schema and a migration forever.
+
+    A region that fails is skipped, never fatal — a digest covering three
+    regions out of four is still worth sending — but the failures come back in
+    the report rather than only in a log line. "Nothing is over-provisioned"
+    and "every region refused to answer" produce identical suggestion lists and
+    mean opposite things, and only one of them is safe to act on by doing
+    nothing. That is the same lie run_scan's regions_failed exists to prevent.
+
+    Protected instances are excluded. A resource tagged finops:protected=true
+    is one the owner has said not to touch, and "you could shrink this" is
+    still touching it.
+    """
+    suggestions: list[RightsizingSuggestion] = []
+    regions_failed: dict[str, str] = {}
+    examined = 0
+
+    for target in targets:
+        try:
+            instances = target.gateway.describe_running_ec2_instances()
+        except Exception as exc:  # noqa: BLE001 — one bad region must not sink the digest
+            regions_failed[target.region] = f"{type(exc).__name__}: {exc}"
+            logger.warning("Right-sizing skipped region %s: %s", target.region, exc)
+            continue
+
+        for instance in instances:
+            instance_id = instance["InstanceId"]
+            instance_type = instance.get("InstanceType", "")
+            tags = instance.get("Tags", [])
+            tags_dict = {t["Key"]: t["Value"] for t in tags} if isinstance(tags, list) else tags
+            if rules.is_protected(tags_dict):
+                continue
+            examined += 1
+
+            try:
+                cpu = target.gateway.get_metric_averages(
+                    namespace="AWS/EC2",
+                    dimensions={"InstanceId": instance_id},
+                    metric_name="CPUUtilization",
+                    days=observation_days,
+                )
+            except Exception as exc:  # noqa: BLE001 — one instance, not the digest
+                logger.warning("No CPU metrics for %s: %s", instance_id, exc)
+                continue
+
+            suggestion = suggest_rightsizing(
+                resource_id=instance_id,
+                region=target.region,
+                instance_type=instance_type,
+                cpu_series=cpu,
+                current_monthly_cost_usd=pricing.ec2_instance_monthly(
+                    instance_type=instance_type, region=target.region
+                ),
+                candidates=pricing.rightsizing_candidates(
+                    instance_type=instance_type, region=target.region
+                ),
+                observation_days=observation_days,
+                cpu_headroom_percent=cpu_headroom_percent,
+                min_datapoints=min_datapoints,
+            )
+            if suggestion is not None:
+                suggestions.append(suggestion)
+
+    return RightsizingReport(
+        suggestions=rank_suggestions(suggestions, max_items),
+        regions_failed=regions_failed,
+        instances_examined=examined,
+    )
+
+
+def _narrate(advisor: Advisor | None, topic: str, facts: dict[str, Any]) -> str:
+    """Prose for a digest section, whatever the advisor does.
+
+    The Advisor port forbids raising, and both shipped adapters honour it — but
+    this is the one caller where a third-party implementation breaking that
+    contract would cost the entire digest rather than one finding's summary.
+    Three lines to make that impossible.
+    """
+    if advisor is not None:
+        try:
+            return advisor.narrate(topic, facts)
+        except Exception as exc:  # noqa: BLE001 — advisory text is never worth a failed send
+            logger.warning("Advisor.narrate(%s) raised, using template: %s", topic, exc)
+    return render_template_narration(topic, facts)
+
+
+def compose_digest_sections(
+    report: RightsizingReport,
+    anomaly: SpendAnomaly | None,
+    advisor: Advisor | None = None,
+    observation_days: int = 14,
+) -> list[str]:
+    """Render the digest body. Pure: no sending, no repository, no clock.
+
+    The anomaly leads when there is one — it is the time-sensitive part ("did
+    something change since yesterday"), where right-sizing is a standing
+    backlog that will still be true next week.
+
+    Takes the whole report rather than just its suggestions so the message can
+    say when its coverage was partial. A reader who sees "nothing looks
+    over-provisioned" acts by doing nothing, which is the wrong response to
+    "three regions did not answer".
+
+    Every number here was computed deterministically before the advisor saw
+    it; narration only arranges what it was given.
+    """
+    suggestions = report.suggestions
+    sections: list[str] = []
+
+    if anomaly is not None:
+        facts = {
+            "date": anomaly.date.isoformat(),
+            "value": str(anomaly.value),
+            "mean": str(anomaly.mean),
+            "z_score": anomaly.z_score,
+            "window_days": anomaly.window_days,
+            "direction": anomaly.direction,
+        }
+        sections.append(
+            "*Spend anomaly*\n"
+            + _narrate(advisor, "spend_anomaly", facts)
+            + f"\n_Estimated monthly waste, not billed spend — "
+            f"${anomaly.value} vs. a ${anomaly.mean} average "
+            f"(z={anomaly.z_score}) over {anomaly.window_days} days._"
+        )
+
+    if suggestions:
+        saving = total_saving(list(suggestions))
+        facts = {
+            "count": len(suggestions),
+            "window_days": observation_days,
+            "total_saving": str(saving),
+        }
+        lines = [
+            f"• `{s.resource_id}` ({s.region}) {s.current_instance_type} → "
+            f"{s.candidate.instance_type} — save ${s.candidate.monthly_saving_usd}/mo "
+            f"(peak CPU {s.max_cpu_percent}%, {s.datapoints} datapoints)"
+            for s in suggestions
+        ]
+        sections.append(
+            "*Right-sizing suggestions*\n"
+            + _narrate(advisor, "rightsizing", facts)
+            + "\n"
+            + "\n".join(lines)
+        )
+    else:
+        sections.append(
+            "*Right-sizing suggestions*\nNothing looks over-provisioned across the "
+            f"{report.instances_examined} running instance(s) examined over the last "
+            f"{observation_days} days. Instances with too little metric history to "
+            "judge are skipped rather than assumed healthy."
+        )
+
+    if report.regions_failed:
+        # Last, and unmissable. This is the line that stops an empty digest
+        # reading as a clean bill of health.
+        failures = "\n".join(
+            f"• {region}: {error}" for region, error in sorted(report.regions_failed.items())
+        )
+        sections.append(
+            f"*⚠️ Incomplete coverage* — {len(report.regions_failed)} region(s) could not "
+            f"be checked, so the suggestions above are not the whole picture:\n{failures}"
+        )
+
+    return sections
+
+
+def send_digest(
+    repo: FindingsRepository,
+    notifier: Notifier,
+    report: RightsizingReport,
+    anomaly: SpendAnomaly | None = None,
+    advisor: Advisor | None = None,
+    observation_days: int = 14,
+    title: str = "FinOps Sentinel — weekly digest",
+) -> str | None:
+    """Compose and send the digest exactly once, then audit it.
+
+    Advisory end to end: send_digest's port contract forbids approve/deny
+    affordances, and nothing here changes a finding's status. A digest is a
+    report, so re-sending it is harmless — which is why it needs none of the
+    compare-and-swap machinery the notification path has.
+    """
+    sections = compose_digest_sections(
+        report, anomaly, advisor=advisor, observation_days=observation_days
+    )
+    message_ref = notifier.send_digest(title, sections)
+    _audit(
+        repo,
+        "digest_sent",
+        None,
+        {
+            "channel": notifier.channel_name,
+            "message_ref": message_ref,
+            "suggestions": len(report.suggestions),
+            "total_saving_usd": str(total_saving(report.suggestions)),
+            "instances_examined": report.instances_examined,
+            "regions_failed": sorted(report.regions_failed),
+            "anomaly": anomaly.date.isoformat() if anomaly else None,
+        },
+    )
+    return message_ref
 
 
 def expire_stale(repo: FindingsRepository, max_age_hours: int = EXPIRY_HOURS) -> list[str]:
