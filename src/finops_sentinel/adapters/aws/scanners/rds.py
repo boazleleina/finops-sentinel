@@ -20,6 +20,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from finops_sentinel.adapters.aws.scanners import mean_or_zero
 from finops_sentinel.domain.models import (
     Finding,
     FindingStatus,
@@ -40,10 +41,6 @@ RDS_DIMENSION = "DBInstanceIdentifier"
 # backing-up, deleting) is in motion and gets no verdict from either.
 AVAILABLE = "available"
 STOPPED = "stopped"
-
-
-def _mean(values: list[float]) -> float:
-    return sum(values) / len(values) if values else 0.0
 
 
 def _tags(instance: dict[str, Any]) -> dict[str, Any]:
@@ -131,7 +128,7 @@ class IdleRDSScanner(Scanner):
                 # production database.
                 continue
 
-            average = _mean(connections)
+            average = mean_or_zero(connections)
             if average > self.max_connections:
                 continue
 

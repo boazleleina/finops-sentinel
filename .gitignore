@@ -11,10 +11,15 @@ ENV/
 # Configuration and secrets
 .env
 .env.*
-! .env.example
+# No space after "!": "! .env.example" negates a pattern with a literal
+# leading space, which matches nothing — the file stayed tracked only
+# because it was committed before the rule existed.
+!.env.example
 
-# Databases
+# Databases, including timestamped backups (*.db alone missed .db.bak-*,
+# which is how two database backups ended up committed)
 *.db
+*.db.bak*
 *.sqlite
 
 # Testing / Coverage
