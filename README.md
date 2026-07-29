@@ -16,6 +16,9 @@ By applying strict FinOps principles, it identifies cloud waste (e.g., unattache
 
 FinOps Sentinel is built on **Hexagonal Architecture (Ports & Adapters)** and **Domain-Driven Design (DDD)**. The core business rules are strictly decoupled from external libraries, databases, and AWS interfaces.
 
+> [!TIP]
+> **[ARCHITECTURE.md](ARCHITECTURE.md) is the full engineering document** — every port and adapter explained, the database design, the safety model, end-to-end execution flows, and the reasoning behind each significant decision. Read it if you are working on the code rather than running it.
+
 ```mermaid
 flowchart TD
     %% Define Styles
