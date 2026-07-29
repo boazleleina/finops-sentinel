@@ -30,14 +30,23 @@ def make_resource(
     resource_id: str = "vol-123",
     resource_type: ResourceType = ResourceType.EBS_VOLUME,
     tags: dict[str, Any] | None = None,
+    region: str = "us-east-1",
+    seen: datetime | None = None,
 ) -> Resource:
-    now = datetime.now(UTC)
+    """The one place a test Resource is constructed.
+
+    Test modules with scenario-specific defaults (a different region, a
+    derived id) wrap this rather than re-listing every field — three modules
+    each carrying their own ten-field constructor is how the shapes drift
+    apart the first time the model changes.
+    """
+    now = seen or datetime.now(UTC)
     return Resource(
         id=res_id,
         resource_id=resource_id,
         resource_type=resource_type,
         resource_arn="arn",
-        region="us-east-1",
+        region=region,
         current_tags=tags or {},
         lifecycle=ResourceLifecycle.ACTIVE,
         first_seen_at=now,
@@ -51,20 +60,29 @@ def make_finding(
     resource_ref: str = "res-mock",
     protected: bool = False,
     rule: str = "ebs",
+    **overrides: Any,
 ) -> Finding:
+    """The one place a test Finding is constructed. Same rationale as above.
+
+    `overrides` takes any remaining Finding field by name (llm_summary,
+    est_monthly_cost_usd, evidence, ...), so wrappers do not grow a new named
+    parameter here for every field one scenario cares about.
+    """
     now = datetime.now(UTC)
-    return Finding(
-        id=finding_id,
-        resource_ref=resource_ref,
-        rule=rule,
-        evidence={},
-        tags_at_detection={},
-        est_monthly_cost_usd=Decimal("1.00"),
-        status=status,
-        protected=protected,
-        detected_at=now,
-        last_seen_at=now,
-    )
+    fields: dict[str, Any] = {
+        "id": finding_id,
+        "resource_ref": resource_ref,
+        "rule": rule,
+        "evidence": {},
+        "tags_at_detection": {},
+        "est_monthly_cost_usd": Decimal("1.00"),
+        "status": status,
+        "protected": protected,
+        "detected_at": now,
+        "last_seen_at": now,
+    }
+    fields.update(overrides)
+    return Finding(**fields)
 
 
 class FakeGatewayBase(CloudGateway):

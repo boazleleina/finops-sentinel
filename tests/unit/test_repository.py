@@ -6,31 +6,21 @@ import pytest
 from finops_sentinel.domain.models import (
     AuditEvent,
     Decision,
-    Finding,
     FindingStatus,
     Resource,
     ResourceLifecycle,
     ResourceType,
     SpendSnapshot,
 )
+from tests.fakes import make_finding as base_make_finding
 
 
 def make_finding(finding_id="f-1", status=FindingStatus.OPEN, **overrides):
-    now = datetime.now(UTC)
-    defaults = {
-        "id": finding_id,
-        "resource_ref": "res-1",
-        "rule": "test_rule",
-        "evidence": {},
-        "tags_at_detection": {},
-        "est_monthly_cost_usd": Decimal("10.00"),
-        "status": status,
-        "protected": False,
-        "detected_at": now,
-        "last_seen_at": now,
-    }
-    defaults.update(overrides)
-    return Finding(**defaults)
+    """This module's defaults over the shared constructor in tests.fakes."""
+    overrides.setdefault("resource_ref", "res-1")
+    overrides.setdefault("rule", "test_rule")
+    overrides.setdefault("est_monthly_cost_usd", Decimal("10.00"))
+    return base_make_finding(finding_id, status, **overrides)
 
 
 def test_unknown_resource_type_says_to_migrate(repository):

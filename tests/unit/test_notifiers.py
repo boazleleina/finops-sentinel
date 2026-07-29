@@ -21,6 +21,7 @@ from finops_sentinel.domain.models import (
     ResourceLifecycle,
     ResourceType,
 )
+from tests.fakes import make_finding as base_make_finding
 
 
 @pytest.fixture
@@ -40,19 +41,14 @@ def resource():
 
 
 def make_finding(rule: str, summary: str | None = None) -> Finding:
-    now = datetime.now(UTC)
-    return Finding(
-        id=f"{rule}|i-abc123",
+    """This module's defaults over the shared constructor in tests.fakes."""
+    return base_make_finding(
+        finding_id=f"{rule}|i-abc123",
+        status=FindingStatus.OPEN,
         resource_ref="res-1",
         rule=rule,
-        evidence={},
-        tags_at_detection={},
-        est_monthly_cost_usd=Decimal("70.08"),
         llm_summary=summary,
-        status=FindingStatus.OPEN,
-        protected=False,
-        detected_at=now,
-        last_seen_at=now,
+        est_monthly_cost_usd=Decimal("70.08"),
     )
 
 
