@@ -33,11 +33,35 @@ class Settings(BaseSettings):
     slack_team_id: str | None = None
     slack_allowed_channel_ids: str = ""
 
-    # Who may approve a remediation, comma-separated, as the channel names them
-    # (Slack usernames, or user ids where usernames are hidden). Authority, not
-    # provenance — checked in the domain, so it survives a channel swap.
-    # Empty means unconfigured: see AllowlistAuthorizer for what that permits.
+    # Who may approve a remediation. Comma-separated, either bare identifiers
+    # ("U024BE7LH") or identifier=role pairs
+    # ("U024BE7LH=arn:aws:iam::123456789012:role/finops-approver").
+    #
+    # Prefer the channel's stable *user id* over a display name: usernames
+    # change, display names are user-controlled, and this string decides who
+    # gets AWS credentials.
+    #
+    # Authority, not provenance — checked in the domain, so it survives a
+    # channel swap. Empty means unconfigured: see AllowlistAuthorizer.
     sentinel_approvers: str = ""
+
+    # Run each playbook under a role assumed for the approver, with a session
+    # policy narrowed to the one resource, instead of under Sentinel's own
+    # credentials. This is what makes AWS — rather than Sentinel's approver
+    # list — the thing that authorizes a deletion.
+    #
+    # Defaults to false because it needs IAM that a fresh clone does not have,
+    # and because LocalStack Community does not evaluate IAM policies: an
+    # assume-role run there proves the wiring and nothing about enforcement.
+    # Turn it on in any account whose resources you would mind losing.
+    sentinel_assume_role: bool = False
+    # Shared secret required by the approver role's trust policy. The standard
+    # confused-deputy control: the role cannot be assumed by anything that does
+    # not hold it, even if its ARN leaks.
+    sentinel_approver_external_id: str | None = None
+    # Session lifetime. Fifteen minutes is the AssumeRole minimum and is far
+    # more than any playbook needs — the EBS snapshot wait is the long one.
+    sentinel_session_duration_seconds: int = 900
 
 
     # Path to the local SQLite database for finding persistence
@@ -144,9 +168,27 @@ class Settings(BaseSettings):
         return list(ordered) or [self.aws_region]
 
     @property
+    def approver_roles(self) -> dict[str, str | None]:
+        """Actor -> approver role ARN, parsed from SENTINEL_APPROVERS.
+
+        One table, two consumers: the Authorizer takes the keys, and the
+        assume-role gateway factory takes the values. Parsing them separately
+        is how the allowlist and the credential source drift apart.
+
+        A bare entry maps to None — permitted to approve, no role to assume,
+        which only works when SENTINEL_ASSUME_ROLE is off.
+        """
+        parsed: dict[str, str | None] = {}
+        for entry in self.sentinel_approvers.split(","):
+            actor, _, role_arn = entry.strip().partition("=")
+            if actor.strip():
+                parsed[actor.strip()] = role_arn.strip() or None
+        return parsed
+
+    @property
     def approver_actors(self) -> frozenset[str]:
         """Actors permitted to approve, parsed from SENTINEL_APPROVERS."""
-        return frozenset(a.strip() for a in self.sentinel_approvers.split(",") if a.strip())
+        return frozenset(self.approver_roles)
 
     @property
     def allowed_slack_channels(self) -> frozenset[str]:

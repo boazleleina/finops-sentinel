@@ -8,8 +8,8 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
 from finops_sentinel.bootstrap import (
+    get_approval_gateway_factory,
     get_authorizer,
-    get_cloud_gateway,
     get_notifier,
     get_repository,
 )
@@ -107,9 +107,10 @@ def _decide(finding_id: str, action: str, actor: str, channel: str) -> bool:
         return approve_finding(
             finding_id,
             repo,
-            # The resolver, not a gateway: the service picks the endpoint for
-            # the finding's own region.
-            get_cloud_gateway,
+            # A factory, not a gateway: the credentials depend on the approval
+            # — its region, and (with SENTINEL_ASSUME_ROLE on) whose role runs
+            # it, scoped to that one resource.
+            get_approval_gateway_factory(),
             actor=actor,
             channel=channel,
             dry_run=settings.dry_run,
@@ -150,7 +151,12 @@ def _run_remediation(
     time this runs, and so is that handle's session.
     """
     try:
-        execute_approval(plan, get_repository(), get_cloud_gateway, dry_run=settings.dry_run)
+        execute_approval(
+            plan,
+            get_repository(),
+            get_approval_gateway_factory(),
+            dry_run=settings.dry_run,
+        )
     except Exception as exc:  # a failed playbook must still update the message
         logger.exception("Remediation failed for %s", plan.finding_id)
         notifier.confirm_decision(

@@ -362,9 +362,9 @@ def test_remediation_uses_the_gateway_for_the_findings_own_region(repository):
     gateways = {region: RecordingGateway(region) for region in ("us-east-1", "eu-west-1")}
     requested = []
 
-    def resolve(region):
-        requested.append(region)
-        return gateways[region]
+    def resolve(plan):
+        requested.append(plan.region)
+        return gateways[plan.region]
 
     approved = approve_finding(
         "f-west", repository, resolve, actor="boaz", channel="api", dry_run=False
@@ -397,8 +397,8 @@ def test_unresolvable_region_is_recorded_as_a_failed_remediation(repository):
         )
     )
 
-    def resolve(region):
-        raise RuntimeError(f"no credentials for {region}")
+    def resolve(plan):
+        raise RuntimeError(f"no credentials for {plan.region}")
 
     with pytest.raises(RuntimeError):
         approve_finding(

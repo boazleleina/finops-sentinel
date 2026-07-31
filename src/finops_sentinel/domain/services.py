@@ -346,17 +346,14 @@ class ApprovalPlan(NamedTuple):
     a task boundary, and it has to stay a statement of what was decided rather
     than a live object graph.
 
-    Carries the actor and the resource ARN because the gateway factory is what
-    resolves credentials. An adapter that runs the playbook under the
-    approver's own AWS role needs to know who approved, and one that narrows
-    the session to this single resource needs to know which. Both are stated in
-    domain terms — no role ARNs, no session policies, nothing this module would
-    have to relearn for a different cloud.
+    Carries the actor because the gateway factory is what resolves credentials:
+    an adapter that runs the playbook under the approver's own AWS role needs
+    to know who approved. Stated in domain terms — no role ARNs, no session
+    policies, nothing this module would have to relearn for a different cloud.
     """
 
     finding_id: str
     resource_id: str
-    resource_arn: str
     region: str
     playbook: str
     actor: str
@@ -467,7 +464,6 @@ def commit_approval(
     return ApprovalPlan(
         finding_id=finding.id,
         resource_id=resource.resource_id,
-        resource_arn=resource.resource_arn,
         region=resource.region,
         playbook=playbook,
         actor=actor,
@@ -559,7 +555,7 @@ def execute_approval(
 def approve_finding(
     finding_id: str,
     repo: FindingsRepository,
-    gateway_for_region: Callable[[str], CloudGateway],
+    gateway_for_approval: Callable[[ApprovalPlan], CloudGateway],
     actor: str,
     channel: str,
     dry_run: bool,
@@ -593,7 +589,7 @@ def approve_finding(
     plan = commit_approval(finding_id, repo, actor=actor, channel=channel, authorizer=authorizer)
     if plan is None:
         return False
-    return execute_approval(plan, repo, gateway_for_region, dry_run)
+    return execute_approval(plan, repo, gateway_for_approval, dry_run)
 
 
 def deny_finding(
