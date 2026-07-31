@@ -1,8 +1,11 @@
+import logging
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 
+from finops_sentinel.adapters.authorization.allowlist import AllowlistAuthorizer
+from finops_sentinel.domain import services
 from finops_sentinel.domain.models import (
     FindingStatus,
     ResourceLifecycle,
@@ -165,6 +168,90 @@ def test_double_approve_executes_once(repository):
     assert approve_finding("f-mock", repository, resolver(gateway),
                            actor="boaz", channel="slack", dry_run=False) is False
     assert len(gateway.executed) == 1
+
+
+def test_replayed_approval_executes_once(repository):
+    """A replay of the identical payload deletes nothing a second time.
+
+    The concurrency case (two clicks that both read NOTIFIED) is not what a
+    double-click or a Slack retry-after-timeout produces — those are
+    sequential, and the second one loads the state the first one committed.
+    The approve path snapshots the volume before deleting it, so the window
+    where the buttons are still live is as long as the remediation.
+    """
+    seed(repository)
+    gateway = FakeCloudGateway()
+    payload = {"actor": "boaz", "channel": "slack", "dry_run": False}
+
+    assert approve_finding("f-mock", repository, resolver(gateway), **payload) is True
+    assert approve_finding("f-mock", repository, resolver(gateway), **payload) is False
+
+    assert gateway.executed == [("snapshot_then_delete_volume", "vol-123", False)]
+    assert repository.get_finding_by_id("f-mock").status == FindingStatus.REMEDIATED
+
+
+def test_approve_refuses_replay_even_without_the_transition_gate(repository, monkeypatch):
+    """The CAS alone stops the replay, not just the transition table.
+
+    Passing finding.status as the expected value made the guarantee depend on
+    TRANSITIONS containing no self-loop into APPROVED: a request that loaded
+    APPROVED would have run `SET status='APPROVED' WHERE status='APPROVED'`,
+    matched a row, and remediated again. Adding that self-loop here is the
+    only way to test the precondition rather than the table above it.
+    """
+    seed(repository, finding_status=FindingStatus.APPROVED)  # mid-remediation
+    monkeypatch.setitem(
+        services.TRANSITIONS, FindingStatus.APPROVED,
+        {FindingStatus.APPROVED, FindingStatus.REMEDIATED, FindingStatus.FAILED},
+    )
+    gateway = FakeCloudGateway()
+
+    assert approve_finding("f-mock", repository, resolver(gateway),
+                           actor="boaz", channel="slack", dry_run=False) is False
+    assert gateway.executed == []
+
+
+def test_approve_blocked_for_unauthorized_actor(repository):
+    seed(repository)
+    gateway = FakeCloudGateway()
+    authorizer = AllowlistAuthorizer(frozenset({"boaz"}))
+
+    assert approve_finding("f-mock", repository, resolver(gateway), actor="intern",
+                           channel="slack", dry_run=False, authorizer=authorizer) is False
+
+    assert gateway.executed == []
+    assert repository.get_finding_by_id("f-mock").status == FindingStatus.NOTIFIED
+    blocked = [e for e in repository.get_audit_events("f-mock")
+               if e.event == "approve_blocked_unauthorized"]
+    assert [e.detail["actor"] for e in blocked] == ["intern"]
+
+
+def test_approve_allowed_for_authorized_actor(repository):
+    seed(repository)
+    gateway = FakeCloudGateway()
+    authorizer = AllowlistAuthorizer(frozenset({"boaz"}))
+
+    assert approve_finding("f-mock", repository, resolver(gateway), actor="boaz",
+                           channel="slack", dry_run=False, authorizer=authorizer) is True
+    assert len(gateway.executed) == 1
+
+
+def test_empty_allowlist_permits_but_warns(repository, caplog):
+    """Unconfigured behaves like an unset signing secret: open, and noisy."""
+    seed(repository)
+    gateway = FakeCloudGateway()
+
+    # ...unless the deployment says an empty list means nobody.
+    closed = AllowlistAuthorizer(frozenset(), allow_all_when_empty=False)
+    assert approve_finding("f-mock", repository, resolver(gateway), actor="anyone",
+                           channel="slack", dry_run=False, authorizer=closed) is False
+    assert gateway.executed == []
+
+    with caplog.at_level(logging.WARNING):
+        assert approve_finding("f-mock", repository, resolver(gateway), actor="anyone",
+                               channel="slack", dry_run=False,
+                               authorizer=AllowlistAuthorizer(frozenset())) is True
+    assert "No approvers configured" in caplog.text
 
 
 def test_approve_playbook_failure_marks_failed(repository):

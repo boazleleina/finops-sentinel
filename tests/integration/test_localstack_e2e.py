@@ -135,3 +135,75 @@ def test_full_loop_scan_approve_deleted_audited(localstack_env):
                 ec2.delete_snapshot(SnapshotId=snap["SnapshotId"])
         except Exception:
             pass
+
+
+def test_assume_role_path_runs_the_playbook_under_temporary_credentials(localstack_env):
+    """The assume-role wiring, end to end — and only the wiring.
+
+    LocalStack Community evaluates no IAM policies: it hands back a session for
+    any role ARN and then allows everything that session asks for. So this
+    proves Sentinel asks STS for the right thing and remediates with what STS
+    returned. It cannot prove AWS would refuse an over-reaching call — that
+    assertion needs a real account (docs/iam-policies.md), and asserting it
+    here would produce a green test for an enforcement that never ran.
+    """
+    repo, ec2 = localstack_env
+    actor = "U024BE7LH"
+    settings.sentinel_approvers = f"{actor}=arn:aws:iam::000000000000:role/finops-approver"
+    settings.sentinel_assume_role = True
+    settings.sentinel_approver_external_id = "sentinel-integration"
+
+    volume_id = ec2.create_volume(AvailabilityZone="us-east-1a", Size=1, VolumeType="gp3")[
+        "VolumeId"
+    ]
+    finding_id = f"ebs_unattached|{volume_id}"
+    try:
+        run_scan(get_scan_targets(), repo)
+        notify_open_findings(repo, get_notifier())
+
+        client = TestClient(fastapi_app.app)
+        response = client.post(
+            f"/decisions/{finding_id}", json={"action": "approve", "actor": actor}
+        )
+        assert response.status_code == 200, response.text
+
+        # Remediated by a session assumed for the approver, not by Sentinel's
+        # own credentials.
+        assert repo.get_finding_by_id(finding_id).status == FindingStatus.REMEDIATED
+        assert ec2.describe_volumes(
+            Filters=[{"Name": "volume-id", "Values": [volume_id]}]
+        )["Volumes"] == []
+
+        # An actor with no mapped role is refused before anything is committed.
+        other = ec2.create_volume(AvailabilityZone="us-east-1a", Size=1, VolumeType="gp3")[
+            "VolumeId"
+        ]
+        try:
+            run_scan(get_scan_targets(), repo)
+            notify_open_findings(repo, get_notifier())
+            refused = client.post(
+                f"/decisions/ebs_unattached|{other}",
+                json={"action": "approve", "actor": "not-an-approver"},
+            )
+            assert refused.status_code == 409
+            assert "not permitted to approve" in refused.json()["detail"]
+            assert ec2.describe_volumes(
+                Filters=[{"Name": "volume-id", "Values": [other]}]
+            )["Volumes"] != []
+        finally:
+            try:
+                ec2.delete_volume(VolumeId=other)
+            except Exception:
+                pass
+    finally:
+        try:
+            ec2.delete_volume(VolumeId=volume_id)
+        except Exception:
+            pass
+        try:
+            for snap in ec2.describe_snapshots(
+                Filters=[{"Name": "volume-id", "Values": [volume_id]}]
+            )["Snapshots"]:
+                ec2.delete_snapshot(SnapshotId=snap["SnapshotId"])
+        except Exception:
+            pass

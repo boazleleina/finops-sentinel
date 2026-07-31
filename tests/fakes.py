@@ -153,8 +153,12 @@ class FakeCloudGateway(FakeGatewayBase):
 
 
 def resolver(gateway):
-    """approve_finding takes a region -> gateway resolver, not a gateway."""
-    return lambda _region: gateway
+    """approve_finding takes an ApprovalPlan -> gateway factory, not a gateway.
+
+    The real one assumes the approver's role and scopes the session to the
+    plan's resource; this one ignores the plan and hands back a recorder.
+    """
+    return lambda _plan: gateway
 
 
 class FakeNotifier(Notifier):

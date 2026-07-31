@@ -53,38 +53,25 @@ class Boto3Gateway(CloudGateway):
         aws_access_key_id: str | None = None,
         aws_secret_access_key: str | None = None,
         mpu_age_days: int = 7,
+        aws_session_token: str | None = None,
     ):
         # Only used by the abort playbook, which re-checks upload age at
         # execution time rather than trusting the age recorded at detection.
         self.mpu_age_days = mpu_age_days
-        self.client = boto3.client(
-            "ec2",
-            region_name=region,
-            endpoint_url=endpoint_url,
-            aws_access_key_id=aws_access_key_id,
-            aws_secret_access_key=aws_secret_access_key,
-        )
-        self.cloudwatch = boto3.client(
-            "cloudwatch",
-            region_name=region,
-            endpoint_url=endpoint_url,
-            aws_access_key_id=aws_access_key_id,
-            aws_secret_access_key=aws_secret_access_key,
-        )
-        self.rds = boto3.client(
-            "rds",
-            region_name=region,
-            endpoint_url=endpoint_url,
-            aws_access_key_id=aws_access_key_id,
-            aws_secret_access_key=aws_secret_access_key,
-        )
-        self.s3 = boto3.client(
-            "s3",
-            region_name=region,
-            endpoint_url=endpoint_url,
-            aws_access_key_id=aws_access_key_id,
-            aws_secret_access_key=aws_secret_access_key,
-        )
+        # Session token present means these are temporary credentials from
+        # STS — an approver's assumed role, scoped to one approval — rather
+        # than Sentinel's own long-lived identity.
+        credentials = {
+            "region_name": region,
+            "endpoint_url": endpoint_url,
+            "aws_access_key_id": aws_access_key_id,
+            "aws_secret_access_key": aws_secret_access_key,
+            "aws_session_token": aws_session_token,
+        }
+        self.client = boto3.client("ec2", **credentials)
+        self.cloudwatch = boto3.client("cloudwatch", **credentials)
+        self.rds = boto3.client("rds", **credentials)
+        self.s3 = boto3.client("s3", **credentials)
         self.region = region
 
     def describe_ebs_volumes(self) -> list[dict[str, Any]]:

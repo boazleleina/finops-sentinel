@@ -186,6 +186,8 @@ class SlackAdapter(Notifier):
         except json.JSONDecodeError as exc:
             raise ValueError("Payload is not valid JSON") from exc
 
+        self._verify_provenance(payload)
+
         actions = payload.get("actions") or []
         if not actions:
             raise ValueError("No actions in payload")
@@ -234,6 +236,28 @@ class SlackAdapter(Notifier):
         )
         if response.status_code != 200:
             logger.error("Failed to update Slack message: %s", response.body)
+
+    def _verify_provenance(self, payload: dict[str, Any]) -> None:
+        """Check the callback came from the workspace and channel we notified.
+
+        The signature proves the request transited this app; it does not say
+        which install produced it. Install the app in a second workspace, or
+        widen the channel, and well-signed approvals start arriving from a
+        population nobody enumerated. Slack-shaped by nature — a Telegram
+        adapter would pin a chat id here instead — so it stays on this side of
+        the port, unlike the actor authority check, which is in the domain.
+        """
+        expected_team = settings.slack_team_id
+        if expected_team:
+            team_id = (payload.get("team") or {}).get("id")
+            if team_id != expected_team:
+                raise PermissionError(f"Callback from unexpected Slack workspace: {team_id!r}")
+
+        allowed_channels = settings.allowed_slack_channels
+        if allowed_channels:
+            channel_id = (payload.get("channel") or {}).get("id")
+            if channel_id not in allowed_channels:
+                raise PermissionError(f"Callback from unexpected channel: {channel_id!r}")
 
     def _verify_signature(self, raw_body: bytes, headers: Mapping[str, str]) -> None:
         secret = settings.slack_signing_secret

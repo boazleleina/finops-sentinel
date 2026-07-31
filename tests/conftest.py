@@ -44,6 +44,11 @@ def aws_credentials():
     # safe default regardless of the developer's .env.
     settings.slack_webhook_url = None
     settings.slack_signing_secret = None
+    settings.slack_team_id = None
+    settings.slack_allowed_channel_ids = ""
+    settings.sentinel_approvers = ""
+    settings.sentinel_assume_role = False
+    settings.sentinel_approver_external_id = None
     settings.dry_run = True
 
 @pytest.fixture

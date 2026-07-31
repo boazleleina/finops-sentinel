@@ -7,6 +7,8 @@ from collections.abc import Callable
 
 from finops_sentinel.adapters.advisor.ollama import OllamaAdvisor
 from finops_sentinel.adapters.advisor.template import TemplateAdvisor
+from finops_sentinel.adapters.authorization.allowlist import AllowlistAuthorizer
+from finops_sentinel.adapters.aws.approval_credentials import AssumeRoleGatewayFactory
 from finops_sentinel.adapters.aws.gateway import Boto3Gateway, list_enabled_regions
 from finops_sentinel.adapters.aws.pricing import StaticPricing
 from finops_sentinel.adapters.aws.scanners.ebs import UnattachedEBSScanner
@@ -20,8 +22,9 @@ from finops_sentinel.adapters.notifications.console import ConsoleNotifier
 from finops_sentinel.adapters.notifications.slack import SlackAdapter
 from finops_sentinel.adapters.persistence.sqlalchemy_repo import SqlAlchemyRepository
 from finops_sentinel.config import database_url, settings
-from finops_sentinel.domain.services import MetricTarget, ScanTarget
+from finops_sentinel.domain.services import ApprovalPlan, MetricTarget, ScanTarget
 from finops_sentinel.ports.advisor import Advisor
+from finops_sentinel.ports.authorization import Authorizer
 from finops_sentinel.ports.cloud import CloudGateway
 from finops_sentinel.ports.notifier import Notifier
 from finops_sentinel.ports.pricing import Pricing
@@ -66,8 +69,9 @@ def get_regions() -> list[str]:
 def get_cloud_gateway(region: str | None = None) -> CloudGateway:
     """A gateway bound to one region; defaults to the home region.
 
-    Doubles as the region resolver handed to services.approve_finding, which
-    remediates each finding through its own region's endpoint.
+    Sentinel's own identity: read-only in any account configured the way
+    docs/iam-policies.md describes. Scanning uses this. Remediation does not —
+    see get_approval_gateway_factory.
     """
     return Boto3Gateway(
         region=region or settings.aws_region,
@@ -82,6 +86,64 @@ def get_repository() -> FindingsRepository:
     # Same builder Alembic uses, so a migration can never target a different
     # file than the one the app reads and writes.
     return SqlAlchemyRepository(db_url=database_url())
+
+
+def get_authorizer() -> Authorizer:
+    """Who may approve.
+
+    With SENTINEL_ASSUME_ROLE on, an approver without a mapped role is not an
+    approver: the remediation would have no credentials to run under, and
+    finding that out after the CAS has committed means a finding stranded in
+    FAILED for a configuration mistake. Refuse it at the guardrail instead,
+    where it is audited as approve_blocked_unauthorized like every other
+    refusal.
+    """
+    roles = settings.approver_roles
+    if not settings.sentinel_assume_role:
+        return AllowlistAuthorizer(frozenset(roles))
+
+    with_roles = frozenset(actor for actor, role_arn in roles.items() if role_arn)
+    missing = sorted(set(roles) - with_roles)
+    if missing:
+        logger.warning(
+            "SENTINEL_ASSUME_ROLE is on and these approvers have no role ARN, so they "
+            "cannot approve: %s. Use actor=arn:aws:iam::<account>:role/<role> entries.",
+            ", ".join(missing),
+        )
+    return AllowlistAuthorizer(with_roles)
+
+
+def get_approval_gateway_factory() -> Callable[[ApprovalPlan], CloudGateway]:
+    """The credentials an approved playbook runs under.
+
+    With SENTINEL_ASSUME_ROLE on, each approval assumes the approver's role
+    with a session policy scoped to that one resource, so AWS authorizes the
+    deletion against a principal that names a person, and Sentinel's own role
+    never needs a destructive permission at all.
+
+    Off, everything runs under Sentinel's own credentials — which means the
+    approver list is Sentinel's own gate and nothing more. That is the right
+    default for LocalStack (Community evaluates no IAM policies) and the wrong
+    one for an account you would mind losing, so it says so out loud.
+    """
+    if not settings.sentinel_assume_role:
+        logger.warning(
+            "SENTINEL_ASSUME_ROLE is off: remediations run under Sentinel's own AWS "
+            "credentials, so approver identity is not enforced by IAM."
+        )
+        return lambda plan: get_cloud_gateway(plan.region)
+
+    return AssumeRoleGatewayFactory(
+        role_for_actor={
+            actor: role_arn
+            for actor, role_arn in settings.approver_roles.items()
+            if role_arn is not None
+        },
+        external_id=settings.sentinel_approver_external_id,
+        session_duration_seconds=settings.sentinel_session_duration_seconds,
+        endpoint_url=settings.aws_endpoint_url,
+        mpu_age_days=settings.s3_incomplete_mpu_age_days,
+    )
 
 
 def get_notifier() -> Notifier:

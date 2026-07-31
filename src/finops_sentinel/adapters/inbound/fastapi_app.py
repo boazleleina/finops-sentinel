@@ -1,16 +1,31 @@
 """Inbound FastAPI adapter. Routes are thin: parse input, call a domain
 service, format output. Channel-specific callback logic (signatures, payload
 shape) lives in the configured Notifier adapter, not here."""
+import logging
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
-from finops_sentinel.bootstrap import get_cloud_gateway, get_notifier, get_repository
+from finops_sentinel.bootstrap import (
+    get_approval_gateway_factory,
+    get_authorizer,
+    get_notifier,
+    get_repository,
+)
 from finops_sentinel.config import settings
 from finops_sentinel.domain.models import AuditEvent, Finding, FindingStatus, Resource
 from finops_sentinel.domain.rules import is_remediable
-from finops_sentinel.domain.services import approve_finding, deny_finding
+from finops_sentinel.domain.services import (
+    ApprovalPlan,
+    approve_finding,
+    commit_approval,
+    deny_finding,
+    execute_approval,
+)
+from finops_sentinel.ports.notifier import Notifier
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="FinOps Sentinel API", version="0.1.0")
 
@@ -54,7 +69,13 @@ def _refusal_reason(finding_id: str, action: str) -> str:
     guess from the generic message, and it is the one refusal a user can
     trigger deliberately — so name it.
     """
-    finding = get_repository().get_finding_by_id(finding_id)
+    repo = get_repository()
+    events = repo.get_audit_events(finding_id=finding_id)
+    if events and events[-1].event == "approve_blocked_unauthorized":
+        actor = events[-1].detail.get("actor", "that account")
+        return f"@{actor} is not permitted to approve remediations"
+
+    finding = repo.get_finding_by_id(finding_id)
     if finding is not None and not is_remediable(finding.rule):
         return (
             f"Finding {finding_id} is advisory only: rule '{finding.rule}' is inferred from "
@@ -86,12 +107,16 @@ def _decide(finding_id: str, action: str, actor: str, channel: str) -> bool:
         return approve_finding(
             finding_id,
             repo,
-            # The resolver, not a gateway: the service picks the endpoint for
-            # the finding's own region.
-            get_cloud_gateway,
+            # A factory, not a gateway: the credentials depend on the approval
+            # — its region, and (with SENTINEL_ASSUME_ROLE on) whose role runs
+            # it, scoped to that one resource.
+            get_approval_gateway_factory(),
             actor=actor,
             channel=channel,
             dry_run=settings.dry_run,
+            # Authority, checked in the domain: the notifier already proved the
+            # request came through the app, which is a different question.
+            authorizer=get_authorizer(),
         )
     return deny_finding(finding_id, repo, actor=actor, channel=channel)
 
@@ -113,12 +138,58 @@ def post_decision(finding_id: str, body: DecisionRequest) -> DecisionResponse:
     )
 
 
+def _run_remediation(
+    plan: ApprovalPlan,
+    notifier: Notifier,
+    reply_context: dict[str, Any],
+    actor: str,
+    where: str,
+) -> None:
+    """Run an approved playbook after the callback has been acknowledged.
+
+    Its own repository handle: the request that scheduled it is gone by the
+    time this runs, and so is that handle's session.
+    """
+    try:
+        execute_approval(
+            plan,
+            get_repository(),
+            get_approval_gateway_factory(),
+            dry_run=settings.dry_run,
+        )
+    except Exception as exc:  # a failed playbook must still update the message
+        logger.exception("Remediation failed for %s", plan.finding_id)
+        notifier.confirm_decision(
+            reply_context,
+            f"❌ *Remediation failed*{where} after approval by @{actor} — "
+            f"`{plan.playbook}` did not complete ({exc}). See the audit log for details.",
+        )
+        return
+
+    if settings.dry_run:
+        outcome = f"✅ *Approved* by @{actor} — DRY RUN, no resources were changed{where}."
+    else:
+        outcome = f"✅ *Approved* by @{actor} — remediation executed{where}."
+    notifier.confirm_decision(reply_context, outcome)
+
+
 @app.post("/callbacks/{channel}")
-async def notifier_callback(channel: str, request: Request) -> dict[str, Any]:
+async def notifier_callback(
+    channel: str, request: Request, background_tasks: BackgroundTasks
+) -> dict[str, Any]:
     """
     Webhook endpoint for interactive decision callbacks (e.g. Slack buttons).
     The raw payload is handed to the configured Notifier adapter, which
     verifies authenticity and parses it into a domain Decision.
+
+    Approvals answer in two messages, because remediation is not fast: the EBS
+    playbook waits on a snapshot before it deletes anything, and Slack expects
+    a response in three seconds. Everything that decides — guardrails, the
+    authority check, the CAS onto APPROVED — runs inline and is quick. Then the
+    message is edited (which removes the buttons, closing the window a
+    double-click or a Slack retry-after-timeout would arrive through) and the
+    playbook runs in the background, editing the message again with the
+    outcome.
     """
     notifier = get_notifier()
     if channel != notifier.channel_name:
@@ -137,34 +208,51 @@ async def notifier_callback(channel: str, request: Request) -> dict[str, Any]:
     region = _finding_region(decision.finding_id)
     where = f" in `{region}`" if region else ""
 
-    try:
-        success = _decide(
-            decision.finding_id, decision.action, actor=decision.actor, channel=channel
-        )
-    except Exception:  # noqa: BLE001 — any playbook failure must produce a clean Slack reply, not a 500
-        # Playbook failed mid-remediation; the service already recorded
-        # FAILED plus the audit/remediation rows. Reply cleanly instead of 500.
-        outcome = (
-            f"❌ *Remediation failed*{where} after approval by @{decision.actor} — "
-            "the resource may no longer exist. See the audit log for details."
-        )
-        notifier.confirm_decision(reply_context, outcome)
-        return {"message": "failed", "outcome": outcome}
+    if decision.action == "deny":
+        # Nothing to execute — a denial is one state change and no cloud call.
+        if deny_finding(
+            decision.finding_id, get_repository(), actor=decision.actor, channel=channel
+        ):
+            outcome = f"🚫 *Denied* by @{decision.actor} — no action taken, finding closed."
+            notifier.confirm_decision(reply_context, outcome)
+            return {"message": "ok", "outcome": outcome}
+        return _rejected(notifier, reply_context, decision.finding_id, "deny")
 
-    if not success:
-        outcome = f"⚠️ Could not {decision.action} — {_refusal_reason(decision.finding_id, decision.action)}"
-    elif decision.action == "deny":
-        outcome = f"🚫 *Denied* by @{decision.actor} — no action taken, finding closed."
-    elif settings.dry_run:
-        outcome = (
-            f"✅ *Approved* by @{decision.actor} — DRY RUN, no resources were "
-            f"changed{where}."
-        )
-    else:
-        outcome = f"✅ *Approved* by @{decision.actor} — remediation executed{where}."
+    plan = commit_approval(
+        decision.finding_id,
+        get_repository(),
+        actor=decision.actor,
+        channel=channel,
+        # Authority, checked in the domain: the notifier already proved the
+        # request came through the app, which is a different question.
+        authorizer=get_authorizer(),
+    )
+    if plan is None:
+        # Refused by a guardrail, or already decided. The buttons come off
+        # either way: the finding is not in NOTIFIED any more, so nothing a
+        # second click could do would be accepted.
+        return _rejected(notifier, reply_context, decision.finding_id, "approve")
 
+    # The finding is APPROVED in the database before this message goes out, so
+    # the acknowledgement and the state that makes a replay a no-op land
+    # together rather than a remediation apart.
+    acknowledgement = (
+        f"⏳ *Approved* by @{decision.actor} — running `{plan.playbook}`{where}. "
+        "This message will update when it finishes."
+    )
+    notifier.confirm_decision(reply_context, acknowledgement)
+    background_tasks.add_task(
+        _run_remediation, plan, notifier, reply_context, decision.actor, where
+    )
+    return {"message": "accepted", "outcome": acknowledgement}
+
+
+def _rejected(
+    notifier: Notifier, reply_context: dict[str, Any], finding_id: str, action: str
+) -> dict[str, Any]:
+    outcome = f"⚠️ Could not {action} — {_refusal_reason(finding_id, action)}"
     notifier.confirm_decision(reply_context, outcome)
-    return {"message": "ok" if success else "rejected", "outcome": outcome}
+    return {"message": "rejected", "outcome": outcome}
 
 
 # Run via: uvicorn finops_sentinel.adapters.inbound.fastapi_app:app --reload
