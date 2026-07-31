@@ -25,7 +25,21 @@ class Settings(BaseSettings):
     # Slack Settings
     slack_webhook_url: str | None = None
     slack_signing_secret: str | None = None
-    
+    # Provenance, not authority. The signing secret is app-level, so a
+    # well-signed request only proves it came through this app — including from
+    # a second workspace the app was installed into, or a channel somebody
+    # widened. These pin which workspace and which channels the callback
+    # endpoint accepts. Unset means unrestricted, like an unset signing secret.
+    slack_team_id: str | None = None
+    slack_allowed_channel_ids: str = ""
+
+    # Who may approve a remediation, comma-separated, as the channel names them
+    # (Slack usernames, or user ids where usernames are hidden). Authority, not
+    # provenance — checked in the domain, so it survives a channel swap.
+    # Empty means unconfigured: see AllowlistAuthorizer for what that permits.
+    sentinel_approvers: str = ""
+
+
     # Path to the local SQLite database for finding persistence
     sentinel_db_path: str = ".sentinel.db"
     
@@ -128,6 +142,18 @@ class Settings(BaseSettings):
             region.strip() for region in self.aws_regions.split(",") if region.strip()
         )
         return list(ordered) or [self.aws_region]
+
+    @property
+    def approver_actors(self) -> frozenset[str]:
+        """Actors permitted to approve, parsed from SENTINEL_APPROVERS."""
+        return frozenset(a.strip() for a in self.sentinel_approvers.split(",") if a.strip())
+
+    @property
+    def allowed_slack_channels(self) -> frozenset[str]:
+        """Channel ids the Slack callback endpoint accepts. Empty means any."""
+        return frozenset(
+            c.strip() for c in self.slack_allowed_channel_ids.split(",") if c.strip()
+        )
 
     @property
     def scans_all_regions(self) -> bool:

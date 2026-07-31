@@ -7,6 +7,7 @@ from collections.abc import Callable
 
 from finops_sentinel.adapters.advisor.ollama import OllamaAdvisor
 from finops_sentinel.adapters.advisor.template import TemplateAdvisor
+from finops_sentinel.adapters.authorization.allowlist import AllowlistAuthorizer
 from finops_sentinel.adapters.aws.gateway import Boto3Gateway, list_enabled_regions
 from finops_sentinel.adapters.aws.pricing import StaticPricing
 from finops_sentinel.adapters.aws.scanners.ebs import UnattachedEBSScanner
@@ -22,6 +23,7 @@ from finops_sentinel.adapters.persistence.sqlalchemy_repo import SqlAlchemyRepos
 from finops_sentinel.config import database_url, settings
 from finops_sentinel.domain.services import MetricTarget, ScanTarget
 from finops_sentinel.ports.advisor import Advisor
+from finops_sentinel.ports.authorization import Authorizer
 from finops_sentinel.ports.cloud import CloudGateway
 from finops_sentinel.ports.notifier import Notifier
 from finops_sentinel.ports.pricing import Pricing
@@ -82,6 +84,10 @@ def get_repository() -> FindingsRepository:
     # Same builder Alembic uses, so a migration can never target a different
     # file than the one the app reads and writes.
     return SqlAlchemyRepository(db_url=database_url())
+
+
+def get_authorizer() -> Authorizer:
+    return AllowlistAuthorizer(settings.approver_actors)
 
 
 def get_notifier() -> Notifier:

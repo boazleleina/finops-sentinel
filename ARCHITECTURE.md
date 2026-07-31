@@ -157,6 +157,7 @@ src/finops_sentinel/
 │   ├── notifier.py      # Notifier — outbound alerts, inbound callbacks
 │   ├── advisor.py       # Advisor — LLM prose
 │   ├── pricing.py       # Pricing — what things cost
+│   ├── authorization.py # Authorizer — may this actor approve?
 │   └── scanner.py       # Scanner — the two-pass detection contract
 │
 ├── adapters/            # Concrete implementations. All the messy details.
@@ -164,6 +165,7 @@ src/finops_sentinel/
 │   ├── persistence/     # SQLAlchemy + SQLite
 │   ├── notifications/   # Slack (Block Kit), Console
 │   ├── advisor/         # Ollama (local LLM), Template (deterministic)
+│   ├── authorization/   # Approver allowlist
 │   └── inbound/         # Typer CLI, FastAPI HTTP
 │
 ├── bootstrap.py         # Composition root — the only file that wires
@@ -396,25 +398,51 @@ Sends alerts for `OPEN`, non-protected findings and transitions them to
 - **The CAS transition is checked**: if another process won the race, the loop
   continues rather than double-recording.
 
-#### `approve_finding(...)` — where the guardrails converge
+#### `commit_approval(...)` / `execute_approval(...)` — where the guardrails converge
+
+Split in two because deciding is fast and remediating is not. `commit_approval`
+runs every guardrail and the CAS — repository reads and one write — and returns
+an `ApprovalPlan`; `execute_approval` runs the playbook, which for an EBS volume
+waits on a snapshot and takes minutes. A channel with an acknowledgement
+deadline runs the first half inline, edits its message (removing the buttons)
+and runs the second half in the background. `approve_finding(...)` is the two
+composed, for the CLI and the HTTP API, which have no such deadline.
 
 The order of checks matters, because each produces a different audit event:
 
 ```
-1. Finding exists?                    → False
-2. Transition legal per TRANSITIONS?  → False
-3. Resource exists?                   → False
-4. Resource DELETED?                  → audit "approve_blocked_resource_gone"
-5. Protected (then or now)?           → audit "approve_blocked_protected"
-6. Rule is notify-only?               → audit "approve_blocked_notify_only"
-7. Type has a playbook?               → audit "approve_blocked_no_playbook"
-8. CAS NOTIFIED→APPROVED              → False if lost race
-9. Execute playbook (in try/except)
-10. dry_run? stop at APPROVED : → REMEDIATED
+1.  Finding exists?                    → False
+2.  Transition legal per TRANSITIONS?  → False
+3.  Actor may approve?                 → audit "approve_blocked_unauthorized"
+4.  Resource exists?                   → False
+5.  Resource DELETED?                  → audit "approve_blocked_resource_gone"
+6.  Protected (then or now)?           → audit "approve_blocked_protected"
+7.  Rule is notify-only?               → audit "approve_blocked_notify_only"
+8.  Type has a playbook?               → audit "approve_blocked_no_playbook"
+9.  CAS NOTIFIED→APPROVED              → False if already decided
+10. Execute playbook (in try/except)
+11. dry_run? stop at APPROVED : → REMEDIATED
 ```
 
 Protection is re-checked **at approval time, not just detection time** —
 someone may have tagged the resource in between, and the newer intent wins.
+
+The authority check (3) is in the domain on purpose. A channel adapter proves
+the *transport*: a valid Slack signature says the request came through this app,
+and the signing secret is app-level, so that proof is shared by everyone who can
+see the message. Whether the person who clicked may delete infrastructure is a
+different question, and it is asked here so it survives a swap to any other
+channel. The Slack-shaped half of the problem — which workspace, which channel —
+stays in the adapter next to signature verification, because `team.id` has no
+meaning to a Telegram install.
+
+The CAS at (9) names `NOTIFIED` as its expected value rather than the status
+this invocation happened to read. That distinction is the difference between
+stopping a concurrent double-click and stopping a *replay*: a second click or a
+Slack retry-after-timeout arrives after the first request committed, so it reads
+`APPROVED`, and `SET status='APPROVED' WHERE status='APPROVED'` would match a
+row and remediate twice. The transition table refuses that case one gate above,
+but only for as long as nobody adds a self-loop to it.
 
 The gateway is resolved from *the resource's own region*, not a single
 configured one. An EC2 call for a `eu-west-1` volume sent to the `us-east-1`
@@ -865,9 +893,12 @@ region, which is six paragraphs of AWS prose for a single cause.
 `GET /health`, `GET /findings?status=`, `GET /resources`, `GET /audit`,
 `POST /decisions/{id}`, `POST /callbacks/{channel}`.
 
-`_refusal_reason()` distinguishes a notify-only refusal from a generic one,
-because notify-only is the refusal a user can trigger deliberately and cannot
-guess from a generic message.
+`_refusal_reason()` distinguishes a notify-only refusal, and an unauthorized
+actor, from a generic one — those are the two refusals a user can trigger
+deliberately and cannot guess from a generic message.
+
+`POST /decisions/{id}` remediates inline; `POST /callbacks/{channel}` does not,
+because it answers a channel with a three-second budget (§8.2).
 
 ---
 
@@ -1011,31 +1042,46 @@ POST /callbacks/slack                     (FastAPI)
   ├─ notifier.parse_callback(raw_body, headers)
   │    ├─ verify signature      → 401 if bad
   │    ├─ verify timestamp < 5m → 401 if stale
+  │    ├─ verify team / channel → 401 if another install
   │    └─ payload → Decision(finding_id, actor, action)
   │
   ├─ _finding_region()                    resolved BEFORE remediation, because
   │                                       success may delete the resource row
   ▼
-approve_finding(...)                      (domain)
-  ├─ guardrail chain (§4.3) — any failure audits and returns False
-  ├─ CAS NOTIFIED → APPROVED              lost race → False
+commit_approval(...)                      (domain) — no cloud call, milliseconds
+  ├─ guardrail chain (§4.3) — any failure audits and returns None
+  ├─ CAS NOTIFIED → APPROVED              already decided → None
   ├─ record_decision() + audit
+  └─ ApprovalPlan(finding_id, resource_id, region, playbook)
   │
-  ├─ gateway = gateway_for_region(resource.region)     inside try
+  ▼
+notifier.confirm_decision("⏳ running …")  edits the message, DROPS THE BUTTONS
+  │                                       — sent while the finding is already
+  │                                       APPROVED, so a replay finds no work
+  ▼
+HTTP 200 to Slack                         inside the 3s budget
+  │
+  ▼
+execute_approval(plan, …)                 (background task)
+  ├─ gateway = gateway_for_region(plan.region)         inside try
   ├─ gateway.execute(playbook, resource_id, dry_run)
   │    │
   │    ├─ dry_run → log, return {"dry_run": True}, stay APPROVED
   │    │
   │    └─ live → snapshot_then_delete_volume:
   │              create_snapshot → wait for completion → delete_volume
+  │              (minutes — the reason this half is not in the request)
   │
   ├─ record_remediation(result, detail, timings)
   ├─ CAS APPROVED → REMEDIATED
   └─ audit "remediation_executed"
   │
   ▼
-notifier.confirm_decision()               edits the Slack message, drops buttons
+notifier.confirm_decision(outcome)        edits the message a second time
 ```
+
+A denial takes the short path: one state change, no cloud call, so it resolves
+and replies inside the request.
 
 ### 8.3 A digest
 
@@ -1089,7 +1135,11 @@ finding on a *running* instance from inheriting `terminate_stopped_instance`.
 ### Layer 4 — Human approval
 
 Nothing is ever remediated automatically. Every playbook execution traces back
-to a click or an API call by a named actor, recorded in `decisions`.
+to a click or an API call by a named actor, recorded in `decisions` — and that
+actor must appear in `SENTINEL_APPROVERS` (the `Authorizer` port), or the
+approval is refused and audited as `approve_blocked_unauthorized`. Naming the
+actor and permitting the actor are separate questions, and only the second one
+stops a click.
 
 ### Layer 5 — `DRY_RUN`
 
@@ -1099,7 +1149,9 @@ Default `true`. Playbooks log exactly what they would do and return
 
 ### Supporting properties
 
-- **Atomic CAS transitions** — a double-click cannot execute twice.
+- **Atomic CAS transitions against a literal expected status** — concurrent
+  clicks resolve to one winner, and a replayed one (double-click, Slack retry)
+  finds the finding out of `NOTIFIED` and updates zero rows.
 - **Recovery paths built into destructive playbooks** — volumes are snapshotted
   and the snapshot is *waited on* before deletion.
 - **Execution-time re-validation** — the multipart abort re-checks upload age at
@@ -1108,8 +1160,9 @@ Default `true`. Playbooks log exactly what they would do and return
   deletes no object, because none was ever created.
 - **Complete audit trail** — every refusal has its own event name
   (`approve_blocked_protected`, `approve_blocked_notify_only`,
-  `approve_blocked_no_playbook`, `approve_blocked_resource_gone`), so "why
-  didn't it act?" is answerable from the database.
+  `approve_blocked_no_playbook`, `approve_blocked_resource_gone`,
+  `approve_blocked_unauthorized`), so "why didn't it act?" is answerable from
+  the database — including for the attempts nobody was permitted to make.
 
 ### Trust boundary for LLM output
 

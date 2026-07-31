@@ -462,7 +462,7 @@ ngrok http 8000
 
 Copy the `Forwarding` URL (e.g. `https://<your-id>.ngrok.app`) into your Slack app's **Interactivity & Shortcuts** page, appending `/callbacks/slack`.
 
-Now click a button. Approve runs the allowlisted playbook — for an unattached volume that means snapshot-then-delete, so the data is recoverable — and edits the original message with the outcome. Requests with an invalid signature are rejected with `401`.
+Now click a button. Approve runs the allowlisted playbook — for an unattached volume that means snapshot-then-delete, so the data is recoverable. The message updates twice: once immediately, which removes the buttons and names the playbook, and again when the playbook finishes. Snapshot-then-delete waits for the snapshot and takes minutes, so the acknowledgement cannot wait on it and still answer Slack inside three seconds; the approval is committed to the database before that first edit goes out, which is what makes a second click a no-op rather than a second deletion. Requests with an invalid signature are rejected with `401`, as are callbacks from a workspace or channel outside `SLACK_TEAM_ID` / `SLACK_ALLOWED_CHANNEL_IDS`, and approvals from an actor missing from `SENTINEL_APPROVERS`.
 
 Several messages will have **no buttons**: the `ec2_idle`, `rds_idle`, `rds_stopped` and `s3_no_lifecycle` advisories, plus the whole digest. That is intentional, and it is the main reason an alert can look "missing" — an advisory posts as a plain message with no Approve/Deny row, so it reads differently from the interactive ones and is easy to scroll past. Metric-inferred and fractional-cost findings are never auto-remediated, so offering a button would promise an action the domain refuses.
 

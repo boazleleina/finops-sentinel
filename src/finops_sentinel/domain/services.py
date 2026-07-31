@@ -29,6 +29,7 @@ from finops_sentinel.domain.models import (
 from finops_sentinel.domain.rightsizing import rank_suggestions, suggest_rightsizing, total_saving
 from finops_sentinel.domain.summaries import render_template_narration, render_template_summary
 from finops_sentinel.ports.advisor import Advisor
+from finops_sentinel.ports.authorization import Authorizer
 from finops_sentinel.ports.cloud import CloudGateway
 from finops_sentinel.ports.notifier import Notifier
 from finops_sentinel.ports.pricing import Pricing
@@ -337,43 +338,69 @@ def notify_open_findings(
     return notified
 
 
-def approve_finding(
+class ApprovalPlan(NamedTuple):
+    """A committed approval, and everything its playbook needs to run.
+
+    Produced by commit_approval once the finding is already APPROVED in the
+    database. Holds no repository handle and no gateway: it crosses a thread or
+    a task boundary, and it has to stay a statement of what was decided rather
+    than a live object graph.
+
+    Carries the actor and the resource ARN because the gateway factory is what
+    resolves credentials. An adapter that runs the playbook under the
+    approver's own AWS role needs to know who approved, and one that narrows
+    the session to this single resource needs to know which. Both are stated in
+    domain terms — no role ARNs, no session policies, nothing this module would
+    have to relearn for a different cloud.
+    """
+
+    finding_id: str
+    resource_id: str
+    resource_arn: str
+    region: str
+    playbook: str
+    actor: str
+
+
+def commit_approval(
     finding_id: str,
     repo: FindingsRepository,
-    gateway_for_region: Callable[[str], CloudGateway],
     actor: str,
     channel: str,
-    dry_run: bool,
-) -> bool:
+    authorizer: Authorizer | None = None,
+) -> ApprovalPlan | None:
     """
-    Approve a finding and execute its allowlisted remediation playbook.
+    Run every guardrail and commit the NOTIFIED→APPROVED transition. No cloud
+    call happens here, so this is repository reads and one write — fast enough
+    to finish inside a channel's acknowledgement budget.
 
-    The gateway is resolved from the resource's own region, not from a single
-    configured one: an EC2 API call for a eu-west-1 volume sent to the
-    us-east-1 endpoint fails with InvalidVolume.NotFound, which would read as
-    "already deleted" rather than "wrong region".
+    Split out from approve_finding because remediation is not fast. The EBS
+    playbook snapshots the volume and *waits* for the snapshot before deleting,
+    which is minutes. A caller that ran the whole thing inline would blow
+    Slack's three-second window, leave the buttons on the message for the
+    entire remediation, and hand the user a timeout to retry into. Committing
+    the decision first means the state change — the thing that makes a second
+    click a no-op — has already landed when the acknowledgement goes out.
 
-    Guardrails re-checked here, framework-free:
-    - protected findings (or resources protected since detection) are refused;
-    - only playbooks in PLAYBOOK_ALLOWLIST can run;
-    - the NOTIFIED→APPROVED move is an atomic CAS, so a double-click or a
-      race against expiry executes at most one remediation;
-    - dry_run records the attempt but leaves the finding APPROVED — only a
-      real execution reaches REMEDIATED.
-
-    Returns True if the approval (and remediation, when not dry_run)
-    succeeded. Raises if the playbook itself fails, after recording FAILED.
+    Returns None if any guardrail refused; the reason is in the audit log.
     """
     finding = repo.get_finding_by_id(finding_id)
     if finding is None:
-        return False
+        return None
 
     if FindingStatus.APPROVED not in TRANSITIONS.get(finding.status, set()):
-        return False
+        return None
+
+    if authorizer is not None and not authorizer.can_approve(actor):
+        # Audited like every other refusal: a rejected attempt has to be as
+        # visible in the log as an accepted one, or the trail only records the
+        # approvals that happened to be permitted.
+        _audit(repo, "approve_blocked_unauthorized", finding.id, {"actor": actor})
+        return None
 
     resource = repo.get_resource_by_id(finding.resource_ref)
     if resource is None:
-        return False
+        return None
 
     if resource.lifecycle == ResourceLifecycle.DELETED:
         # The resource vanished since detection (deleted out-of-band or the
@@ -384,7 +411,7 @@ def approve_finding(
             finding.id,
             {"actor": actor, "resource_id": resource.resource_id},
         )
-        return False
+        return None
 
     if finding.protected or rules.is_protected(resource.current_tags):
         _audit(
@@ -393,7 +420,7 @@ def approve_finding(
             finding.id,
             {"actor": actor, "resource_id": resource.resource_id},
         )
-        return False
+        return None
 
     if not rules.is_remediable(finding.rule):
         # Metric-inferred findings are advisory. The type-keyed playbook
@@ -405,7 +432,7 @@ def approve_finding(
             finding.id,
             {"actor": actor, "rule": finding.rule},
         )
-        return False
+        return None
 
     playbook = rules.PLAYBOOK_ALLOWLIST.get(resource.resource_type)
     if playbook is None:
@@ -415,10 +442,16 @@ def approve_finding(
             finding.id,
             {"actor": actor, "resource_type": str(resource.resource_type)},
         )
-        return False
+        return None
 
-    if not repo.transition_finding(finding.id, finding.status, FindingStatus.APPROVED):
-        return False  # lost the race — someone else already decided
+    # NOTIFIED, not finding.status: the precondition has to name the
+    # pre-decision state itself. Passing the status this invocation happens to
+    # have read makes the CAS a tautology on a replay — a second click that
+    # loads APPROVED would run `SET status='APPROVED' WHERE status='APPROVED'`,
+    # match one row, and remediate again. The transition table refuses that
+    # case one gate above, but only as long as nobody adds a self-loop to it.
+    if not repo.transition_finding(finding.id, FindingStatus.NOTIFIED, FindingStatus.APPROVED):
+        return None  # already decided — a concurrent click, or a replayed one
 
     repo.record_decision(
         Decision(
@@ -431,52 +464,136 @@ def approve_finding(
     )
     _audit(repo, "finding_approved", finding.id, {"actor": actor, "channel": channel})
 
+    return ApprovalPlan(
+        finding_id=finding.id,
+        resource_id=resource.resource_id,
+        resource_arn=resource.resource_arn,
+        region=resource.region,
+        playbook=playbook,
+        actor=actor,
+    )
+
+
+def execute_approval(
+    plan: ApprovalPlan,
+    repo: FindingsRepository,
+    gateway_for_approval: Callable[[ApprovalPlan], CloudGateway],
+    dry_run: bool,
+) -> bool:
+    """
+    Run a committed approval's playbook and record what it did.
+
+    The gateway is built from the plan, not from ambient configuration. The
+    region has to come from the resource — an EC2 call for a eu-west-1 volume
+    sent to the us-east-1 endpoint fails with InvalidVolume.NotFound, which
+    reads as "already deleted" rather than "wrong region" — and the factory may
+    use the rest of the plan to decide *whose* credentials execute it. The AWS
+    adapter assumes the approver's role and narrows the session to this one
+    resource; a fake in a test hands back a recorder. The domain does not care
+    which, only that a refusal to issue credentials surfaces here as a failed
+    remediation with an audit row.
+
+    Safe to run outside the request that approved it — the finding is already
+    APPROVED, so nothing else can enter this path for it. Raises if the
+    playbook fails, after recording the failure and moving the finding to
+    FAILED.
+    """
     started_at = datetime.now(UTC)
     try:
-        # Inside the try so a bad region (or missing credentials for it) is
-        # recorded as a failed remediation rather than stranding the finding
-        # in APPROVED with no trace of why.
-        gateway = gateway_for_region(resource.region)
-        result = gateway.execute(playbook, resource.resource_id, dry_run)
+        # Inside the try so a refused credential — or a bad region, or missing
+        # permissions for it — is recorded as a failed remediation rather than
+        # stranding the finding in APPROVED with no trace of why.
+        gateway = gateway_for_approval(plan)
+        result = gateway.execute(plan.playbook, plan.resource_id, dry_run)
     except Exception as exc:
         repo.record_remediation(
-            finding_id=finding.id,
-            playbook=playbook,
+            finding_id=plan.finding_id,
+            playbook=plan.playbook,
             dry_run=dry_run,
             result="error",
             detail={"error": str(exc)},
             started_at=started_at,
             finished_at=datetime.now(UTC),
         )
-        repo.transition_finding(finding.id, FindingStatus.APPROVED, FindingStatus.FAILED)
-        _audit(repo, "remediation_failed", finding.id, {"playbook": playbook, "error": str(exc)})
+        repo.transition_finding(plan.finding_id, FindingStatus.APPROVED, FindingStatus.FAILED)
+        _audit(
+            repo,
+            "remediation_failed",
+            plan.finding_id,
+            {"playbook": plan.playbook, "error": str(exc)},
+        )
         raise
 
     if dry_run:
         repo.record_remediation(
-            finding_id=finding.id,
-            playbook=playbook,
+            finding_id=plan.finding_id,
+            playbook=plan.playbook,
             dry_run=True,
             result="dry_run",
             detail=result,
             started_at=started_at,
             finished_at=datetime.now(UTC),
         )
-        _audit(repo, "remediation_dry_run", finding.id, {"playbook": playbook})
+        _audit(repo, "remediation_dry_run", plan.finding_id, {"playbook": plan.playbook})
         return True
 
     repo.record_remediation(
-        finding_id=finding.id,
-        playbook=playbook,
+        finding_id=plan.finding_id,
+        playbook=plan.playbook,
         dry_run=False,
         result="success",
         detail=result,
         started_at=started_at,
         finished_at=datetime.now(UTC),
     )
-    repo.transition_finding(finding.id, FindingStatus.APPROVED, FindingStatus.REMEDIATED)
-    _audit(repo, "remediation_executed", finding.id, {"playbook": playbook, "result": result})
+    repo.transition_finding(plan.finding_id, FindingStatus.APPROVED, FindingStatus.REMEDIATED)
+    _audit(
+        repo,
+        "remediation_executed",
+        plan.finding_id,
+        {"playbook": plan.playbook, "result": result},
+    )
     return True
+
+
+def approve_finding(
+    finding_id: str,
+    repo: FindingsRepository,
+    gateway_for_region: Callable[[str], CloudGateway],
+    actor: str,
+    channel: str,
+    dry_run: bool,
+    authorizer: Authorizer | None = None,
+) -> bool:
+    """
+    Approve a finding and execute its allowlisted remediation playbook.
+
+    commit_approval followed by execute_approval, for callers with no
+    acknowledgement deadline — the CLI and the HTTP API. A channel adapter that
+    must answer within seconds calls the two halves itself and runs the second
+    one in the background.
+
+    Guardrails re-checked in commit_approval, framework-free:
+    - the actor must be permitted to approve. Channel adapters authenticate the
+      transport (a Slack signature proves the request came through the app,
+      for every human who can see the message); only this check asks whether
+      the person who clicked may delete infrastructure;
+    - protected findings (or resources protected since detection) are refused;
+    - only playbooks in PLAYBOOK_ALLOWLIST can run;
+    - the NOTIFIED→APPROVED move is an atomic CAS against a literal expected
+      status, so concurrent clicks resolve to one winner, and a replay — the
+      double-click, the retry after a Slack timeout — finds the finding already
+      out of NOTIFIED and updates zero rows;
+    - dry_run records the attempt but leaves the finding APPROVED — only a
+      real execution reaches REMEDIATED.
+
+    Returns True if the approval (and remediation, when not dry_run)
+    succeeded. Raises if the playbook itself fails, after recording FAILED.
+    """
+    plan = commit_approval(finding_id, repo, actor=actor, channel=channel, authorizer=authorizer)
+    if plan is None:
+        return False
+    return execute_approval(plan, repo, gateway_for_region, dry_run)
 
 
 def deny_finding(
@@ -495,7 +612,8 @@ def deny_finding(
     if FindingStatus.DENIED not in TRANSITIONS.get(finding.status, set()):
         return False
 
-    if not repo.transition_finding(finding.id, finding.status, FindingStatus.DENIED):
+    # Literal precondition, for the reason spelled out in approve_finding.
+    if not repo.transition_finding(finding.id, FindingStatus.NOTIFIED, FindingStatus.DENIED):
         return False
 
     repo.record_decision(
