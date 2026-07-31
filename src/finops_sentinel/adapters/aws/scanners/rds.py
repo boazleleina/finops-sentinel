@@ -49,14 +49,18 @@ def _tags(instance: dict[str, Any]) -> dict[str, Any]:
     return {tag["Key"]: tag["Value"] for tag in tag_list if "Key" in tag}
 
 
-def _to_resource(instance: dict[str, Any], region: str, now: datetime) -> Resource:
+def _to_resource(
+    instance: dict[str, Any], region: str, account_id: str, now: datetime
+) -> Resource:
     identifier = instance["DBInstanceIdentifier"]
     return Resource(
         id=str(uuid.uuid4()),
         resource_id=identifier,
         resource_type=ResourceType.RDS_INSTANCE,
+        # DescribeDBInstances returns a real ARN; the fallback is for endpoints
+        # that omit it (LocalStack has, historically).
         resource_arn=instance.get("DBInstanceArn")
-        or f"arn:aws:rds:{region}:account:db:{identifier}",
+        or f"arn:aws:rds:{region}:{account_id}:db:{identifier}",
         region=region,
         current_tags=_tags(instance),
         lifecycle=ResourceLifecycle.ACTIVE,
@@ -107,7 +111,9 @@ class IdleRDSScanner(Scanner):
                     metric_name="DatabaseConnections",
                     days=self.observation_days,
                 )
-            discovered.append((_to_resource(instance, self.region, now), instance))
+            discovered.append(
+                (_to_resource(instance, self.region, gateway.account_id, now), instance)
+            )
 
         return discovered
 
@@ -197,7 +203,7 @@ class StoppedRDSScanner(Scanner):
     def discover(self, gateway: CloudGateway) -> list[tuple[Resource, dict[str, Any]]]:
         now = datetime.now(UTC)
         return [
-            (_to_resource(instance, self.region, now), instance)
+            (_to_resource(instance, self.region, gateway.account_id, now), instance)
             for instance in gateway.describe_rds_instances()
         ]
 

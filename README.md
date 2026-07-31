@@ -186,7 +186,8 @@ The Human-In-The-Loop integration and automated playbooks are fully completed an
 *   **Slack Automation & HITL:** A fully functional FastAPI backend that receives interactive payloads from Slack Block Kit buttons. Signing-secret verification, payload parsing, and message editing all live inside the Slack adapter behind the channel-generic `Notifier` port; the callback route is a thin `POST /callbacks/{channel}` wrapper. The edited message names the actual decision-maker ("Approved by @user").
 *   **Remediation Playbooks:** Boto3 adapters explicitly mapped to resource cleanup (taking snapshots before deleting EBS volumes, releasing EIPs, terminating instances). Playbook names come from a domain-owned allowlist — resource types without an explicit playbook entry can never be acted on.
 *   **Audit Trail & Decision Records:** Every scan, notification, approval, denial, execution, and failure is appended to an immutable `audit_events` log. Decisions record who acted, through which channel, and when. Remediation attempts (including dry-runs) are durably recorded with the pre-deletion `snapshot_id` as the recovery path.
-*   **Safety Guardrails (domain-enforced):** `DRY_RUN=true` by default — a dry-run approval records the attempt but leaves the finding `APPROVED`, never falsely `REMEDIATED`. Resources tagged `finops:protected=true` are excluded at scan time and re-checked at approval time. Approvals against resources that have since disappeared are refused cleanly. All transitions are race-safe compare-and-swap operations.
+*   **Authority is enforced by AWS, not by a name list:** with `SENTINEL_ASSUME_ROLE=true`, Sentinel's own role holds no destructive permission at all. Each approval assumes an approver role via STS with an inline session policy scoped to the single resource that approval named, valid for fifteen minutes — so the deletion is authorized by IAM against a principal CloudTrail attributes to a person, and a leaked Sentinel credential can only read. Policies and the honest limits are in [`docs/iam-policies.md`](docs/iam-policies.md).
+*   **Safety Guardrails (domain-enforced):** `DRY_RUN=true` by default — a dry-run approval records the attempt but leaves the finding `APPROVED`, never falsely `REMEDIATED`. Resources tagged `finops:protected=true` are excluded at scan time and re-checked at approval time. Approvals against resources that have since disappeared are refused cleanly. Every transition is a compare-and-swap against a **literal** expected status, so a replayed approval — a double-click, a retry after a Slack timeout — updates zero rows rather than remediating twice. Every refusal has its own audit event, unauthorized attempts included.
 *   **Finding Lifecycle:** Un-actioned notifications expire after 72 hours (`sentinel expire`), timed from the actual notification timestamp.
 
 ### Phase 3 Completed: Docker, CI/CD, & EBS Snapshots
@@ -595,6 +596,20 @@ Every setting, its default, and what it does. All are environment variables, rea
 |---|---|---|
 | `SLACK_WEBHOOK_URL` | *(empty)* | Outbound alerts. Falls back to the console notifier when unset |
 | `SLACK_SIGNING_SECRET` | *(empty)* | Verifies inbound button callbacks; requests failing it get a `401` |
+| `SLACK_TEAM_ID` | *(empty)* | Workspace the callback endpoint accepts. The signing secret is app-level, so a second install produces perfectly signed approvals; this pins which one. Unset accepts any |
+| `SLACK_ALLOWED_CHANNEL_IDS` | *(empty)* | Comma-separated channel ids callbacks may come from. Unset accepts any |
+
+### Approval authority
+
+Who may approve, and whose AWS permissions the deletion runs under. Full setup
+in [`docs/iam-policies.md`](docs/iam-policies.md).
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SENTINEL_APPROVERS` | *(empty)* | Who may approve. Bare ids (`U024BE7LH`), or `id=role-arn` pairs when `SENTINEL_ASSUME_ROLE` is on. Use the channel's stable **user id**, not a display name — display names are user-controlled and this string decides who gets AWS credentials. Empty means anyone who can see the message can approve, logged at WARNING |
+| `SENTINEL_ASSUME_ROLE` | `false` | Run each playbook under a role assumed for the approver, with a session policy scoped to that one resource, instead of under Sentinel's own credentials. This is what makes **AWS** rather than the approver list authorize a deletion. Default `false` because it needs IAM a fresh clone lacks, and LocalStack Community evaluates no IAM policies |
+| `SENTINEL_APPROVER_EXTERNAL_ID` | *(empty)* | Shared secret required by the approver role's trust policy — the confused-deputy control, so the role ARN alone is not enough to assume it |
+| `SENTINEL_SESSION_DURATION_SECONDS` | `900` | Lifetime of the assumed session. Fifteen minutes is the AssumeRole minimum and more than any playbook needs |
 
 ### Detection thresholds
 
@@ -678,7 +693,7 @@ Remediation follows the finding: `approve_finding` resolves the gateway from the
 ### Caveats
 
 *   **Savings estimates stay us-east-1 list prices** in every region, so multi-region totals are conservative. The static pricing adapter logs a warning once per off-region — see [Cost Estimates](#cost-estimates).
-*   **IAM:** the scan needs its usual read grants **in every scanned region**, plus `ec2:DescribeRegions` when using `AWS_REGIONS=all`. Region-scoped IAM conditions are the most common cause of a partially failed scan.
+*   **IAM:** the scan needs its usual read grants **in every scanned region**, plus `ec2:DescribeRegions` when using `AWS_REGIONS=all` and `sts:GetCallerIdentity` so recorded ARNs name the real account. Region-scoped IAM conditions are the most common cause of a partially failed scan. The full policies are in [`docs/iam-policies.md`](docs/iam-policies.md).
 *   **Dropping a region from `AWS_REGIONS` does not delete its inventory.** Resources there stay `ACTIVE` at their last-seen state, since an unscanned region cannot be observed. Scan it once more to retire them.
 
 ### Swapping the model or the backend
@@ -798,6 +813,7 @@ Where the free emulator cannot exercise a feature, the gap is recorded rather th
 | **LocalStack RDS is Pro-tier** | `rds_idle` and `rds_stopped` have no end-to-end test anywhere. The seed script creates no databases, and a local scan reports both scanners as failed | moto unit tests for all scanner logic; an integration test asserts the *degradation* path — that RDS failing does not cost the other scanners their findings | Phase 6, against a real account in read-only `DRY_RUN=true` mode |
 | **LocalStack publishes no `AWS/S3 BucketSizeBytes`** | `s3_no_lifecycle` would never fire locally, since bucket size is read from CloudWatch only | `scripts/seed_localstack.py` publishes synthetic datapoints, exactly as it already does for EC2 idle metrics — covered, not skipped | — |
 | **moto stamps multipart uploads with a fixed 2010 date** | Upload *age* cannot be varied against moto | The abort playbook's age re-check is tested by moving the threshold instead of the timestamp | — |
+| **LocalStack Community evaluates no IAM policies** | `SENTINEL_ASSUME_ROLE` can be exercised locally but not *enforced*: LocalStack issues a session for any role ARN and then permits whatever it asks. A "denied" assertion there would pass the deletion — a green test for something that never ran | An integration test covers the wiring only, and says so; the refusals (unmapped actor, denied `AssumeRole`, unknown playbook, session-policy contents) are unit-tested against a fake STS | Enforcement verified by hand against a sandbox account — the procedure is in [`docs/iam-policies.md`](docs/iam-policies.md) §6 |
 
 One consequence is worth stating plainly: **S3 bucket size is queried with two CloudWatch dimensions** (`BucketName` *and* `StorageType`), because CloudWatch matches dimension sets exactly. Neither moto nor LocalStack publishes that metric, so neither would have caught a single-dimension query — it returns empty for an unrelated reason, and empty is also what "no data" legitimately looks like. That call is pinned by an explicit test rather than left to an end-to-end assertion that cannot exist.
 

@@ -94,6 +94,11 @@ class FakeGatewayBase(CloudGateway):
     updates every fake in one place rather than N.
     """
 
+    # Concrete, unlike the rest: every scanner reads it to build an ARN, so
+    # making each fake stub it would be noise in every test rather than a
+    # signal in any. Matches the account LocalStack issues.
+    account_id = "000000000000"
+
     def describe_ebs_volumes(self):  # pragma: no cover
         raise AssertionError("describe_ebs_volumes not stubbed for this test")
 

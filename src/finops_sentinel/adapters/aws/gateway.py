@@ -72,7 +72,37 @@ class Boto3Gateway(CloudGateway):
         self.cloudwatch = boto3.client("cloudwatch", **credentials)
         self.rds = boto3.client("rds", **credentials)
         self.s3 = boto3.client("s3", **credentials)
+        self.sts = boto3.client("sts", **credentials)
         self.region = region
+        self._account_id: str | None = None
+
+    @property
+    def account_id(self) -> str:
+        """This gateway's account, from sts:GetCallerIdentity, asked once.
+
+        Cached per gateway rather than per process: a gateway built from an
+        assumed role may be pointed at a different account than the one doing
+        the scanning, and an account id cached globally would quietly label its
+        resources with the wrong one.
+
+        A caller denied GetCallerIdentity gets "unknown" and a warning rather
+        than a failed scan — the ARN is display copy, and a scan that reports
+        nothing is a more expensive failure than one that reports a resource
+        with an unresolved account segment. Nothing security-relevant reads it:
+        session policies build their ARNs from the approver role's own account
+        (see adapters/aws/approval_credentials.py).
+        """
+        if self._account_id is None:
+            try:
+                self._account_id = self.sts.get_caller_identity()["Account"]
+            except ClientError as exc:
+                logger.warning(
+                    "Cannot resolve the account id (%s) — resource ARNs will say "
+                    "'unknown'. Grant sts:GetCallerIdentity to fix.",
+                    exc,
+                )
+                self._account_id = "unknown"
+        return self._account_id
 
     def describe_ebs_volumes(self) -> list[dict[str, Any]]:
         volumes: list[dict[str, Any]] = []

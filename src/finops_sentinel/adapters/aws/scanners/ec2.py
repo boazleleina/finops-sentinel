@@ -54,7 +54,7 @@ class StoppedEC2Scanner(Scanner):
             tags = instance.get("Tags", [])
             tags_dict = {t["Key"]: t["Value"] for t in tags} if isinstance(tags, list) else tags
 
-            arn = f"arn:aws:ec2:{self.region}:account:instance/{instance_id}"
+            arn = f"arn:aws:ec2:{self.region}:{gateway.account_id}:instance/{instance_id}"
 
             resource = Resource(
                 id=str(uuid.uuid4()),

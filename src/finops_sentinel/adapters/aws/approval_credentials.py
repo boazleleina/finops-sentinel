@@ -79,10 +79,11 @@ def _account_id(role_arn: str) -> str:
 def resource_arns(plan: ApprovalPlan, account_id: str) -> list[str]:
     """The ARNs this approval's session policy may touch.
 
-    Built here rather than read from Resource.resource_arn: the scanners record
-    a display ARN with a literal "account" segment, which is fine for a Slack
-    message and useless in a policy. A security decision does not get to run on
-    a placeholder.
+    Built here from the approver role's own account rather than read from
+    Resource.resource_arn, which was recorded by whichever credentials
+    discovered the resource, possibly weeks ago. The two agree in a
+    single-account install; when they disagree, the account that will evaluate
+    this policy is the one that issued the role.
     """
     region, resource_id = plan.region, plan.resource_id
     ec2 = f"arn:aws:ec2:{region}:{account_id}"

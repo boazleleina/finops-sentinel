@@ -161,7 +161,9 @@ src/finops_sentinel/
 │   └── scanner.py       # Scanner — the two-pass detection contract
 │
 ├── adapters/            # Concrete implementations. All the messy details.
-│   ├── aws/             # boto3 gateway, pricing tables, six scanners
+│   ├── aws/             # boto3 gateway, pricing tables, six scanners,
+│   │                    #   per-approval STS credentials
+
 │   ├── persistence/     # SQLAlchemy + SQLite
 │   ├── notifications/   # Slack (Block Kit), Console
 │   ├── advisor/         # Ollama (local LLM), Template (deterministic)
@@ -1063,7 +1065,9 @@ HTTP 200 to Slack                         inside the 3s budget
   │
   ▼
 execute_approval(plan, …)                 (background task)
-  ├─ gateway = gateway_for_region(plan.region)         inside try
+  ├─ gateway = gateway_for_approval(plan)              inside try
+  │    └─ assume-role mode: sts:AssumeRole as the approver, session policy
+  │       scoped to this one resource, 15-minute credentials
   ├─ gateway.execute(playbook, resource_id, dry_run)
   │    │
   │    ├─ dry_run → log, return {"dry_run": True}, stay APPROVED
@@ -1140,6 +1144,19 @@ actor must appear in `SENTINEL_APPROVERS` (the `Authorizer` port), or the
 approval is refused and audited as `approve_blocked_unauthorized`. Naming the
 actor and permitting the actor are separate questions, and only the second one
 stops a click.
+
+With `SENTINEL_ASSUME_ROLE=true` the permission is enforced by AWS rather than
+by Sentinel. Sentinel's own role holds no destructive verb at all; each approval
+assumes an approver role via `sts:AssumeRole` with an inline session policy
+narrowed to the one resource that approval named, so the deletion is authorized
+against a principal CloudTrail can attribute to a person, and the session cannot
+touch anything else in the account. `adapters/aws/approval_credentials.py`,
+policies in `docs/iam-policies.md`.
+
+The limit, stated because "IAM enforces it" implies more than is true: the
+actor→role mapping is Sentinel *asserting* an identity from the Slack payload.
+AWS enforces what the session may do; it never sees the Slack user. The chain is
+as strong as the Slack account plus signature verification in front of it.
 
 ### Layer 5 — `DRY_RUN`
 

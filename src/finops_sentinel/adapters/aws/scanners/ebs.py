@@ -31,7 +31,7 @@ class UnattachedEBSScanner(Scanner):
             tags = volume.get('Tags', [])
             tags_dict = {t['Key']: t['Value'] for t in tags} if isinstance(tags, list) else tags
             
-            arn = f"arn:aws:ec2:{self.region}:account:volume/{vol_id}"
+            arn = f"arn:aws:ec2:{self.region}:{gateway.account_id}:volume/{vol_id}"
             
             resource = Resource(
                 id=str(uuid.uuid4()),
