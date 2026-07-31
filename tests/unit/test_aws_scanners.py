@@ -340,3 +340,64 @@ def test_stopped_instance_falls_back_when_volumes_are_not_in_inventory():
     # Assumed 8 GB gp3 root volume: 8 * 0.08 = 0.64
     assert findings[0].est_monthly_cost_usd == Decimal("0.64")
     assert findings[0].evidence["cost_basis"] == "assumed root volume"
+
+
+def test_resource_arns_name_the_real_account(mock_aws_env):
+    """ARNs used to carry a literal "account" segment.
+
+    Fine in a Slack message, worthless everywhere an ARN is actually resolved —
+    an IAM policy, a console link, a support ticket. The account now comes from
+    sts:GetCallerIdentity through the gateway that discovered the resource, so
+    a gateway pointed at another account labels its resources correctly.
+    """
+    ec2 = mock_aws_env
+    volume_id = ec2.create_volume(AvailabilityZone="us-east-1a", Size=1, VolumeType="gp3")[
+        "VolumeId"
+    ]
+    gateway = Boto3Gateway(region="us-east-1")
+
+    resource = UnattachedEBSScanner(region="us-east-1", pricing=StaticPricing()).discover(
+        gateway
+    )[0][0]
+
+    assert resource.resource_arn == (
+        f"arn:aws:ec2:us-east-1:{gateway.account_id}:volume/{volume_id}"
+    )
+    assert gateway.account_id.isdigit()  # a real 12-digit account, not "account"
+    assert ":account:" not in resource.resource_arn
+
+
+def test_account_id_is_asked_for_once(mock_aws_env):
+    """One STS call per gateway, not one per resource discovered."""
+    gateway = Boto3Gateway(region="us-east-1")
+    calls = []
+    real = gateway.sts.get_caller_identity
+
+    def counting():
+        calls.append(1)
+        return real()
+
+    gateway.sts.get_caller_identity = counting
+
+    assert gateway.account_id == gateway.account_id
+    assert len(calls) == 1
+
+
+def test_unresolvable_account_does_not_fail_the_scan(mock_aws_env, caplog):
+    """A denied GetCallerIdentity costs an ARN segment, not the whole scan."""
+    import logging
+
+    from botocore.exceptions import ClientError
+
+    gateway = Boto3Gateway(region="us-east-1")
+
+    def denied():
+        raise ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "no"}}, "GetCallerIdentity"
+        )
+
+    gateway.sts.get_caller_identity = denied
+
+    with caplog.at_level(logging.WARNING):
+        assert gateway.account_id == "unknown"
+    assert "sts:GetCallerIdentity" in caplog.text

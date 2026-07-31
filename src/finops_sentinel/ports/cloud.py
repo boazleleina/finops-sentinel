@@ -8,6 +8,19 @@ class CloudGateway(ABC):
     The domain only knows about these abstract operations.
     """
 
+    @property
+    @abstractmethod
+    def account_id(self) -> str:
+        """The account these credentials belong to.
+
+        Needed to build resource ARNs that are actually addressable. An ARN
+        with a made-up account segment reads fine in a Slack message and is
+        worthless everywhere else — IAM policies, cross-account links, support
+        tickets — so the account is asked for once, from the credentials in
+        hand, rather than guessed.
+        """
+        ...  # pragma: no cover
+
     @abstractmethod
     def describe_ebs_volumes(self) -> list[dict[str, Any]]:
         ...  # pragma: no cover

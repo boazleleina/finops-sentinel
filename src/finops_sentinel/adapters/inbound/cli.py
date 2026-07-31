@@ -400,7 +400,7 @@ def smoke_llm(
         id="smoke-resource",
         resource_id="i-0123456789abcdef0",
         resource_type=ResourceType.EC2_INSTANCE,
-        resource_arn="arn:aws:ec2:us-east-1:account:instance/i-0123456789abcdef0",
+        resource_arn="arn:aws:ec2:us-east-1:000000000000:instance/i-0123456789abcdef0",
         region="us-east-1",
         current_tags={"Name": "batch-worker-03", "env": "staging"},
         lifecycle=ResourceLifecycle.ACTIVE,

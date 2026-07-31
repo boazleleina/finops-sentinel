@@ -72,7 +72,7 @@ class IdleEC2Scanner(Scanner):
                         resource_id=instance_id,
                         resource_type=ResourceType.EC2_INSTANCE,
                         resource_arn=(
-                            f"arn:aws:ec2:{self.region}:account:instance/{instance_id}"
+                            f"arn:aws:ec2:{self.region}:{gateway.account_id}:instance/{instance_id}"
                         ),
                         region=self.region,
                         current_tags=tags_dict,
